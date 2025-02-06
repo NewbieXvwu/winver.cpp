@@ -1,6 +1,6 @@
 #include <windows.h>
 #include <commctrl.h>
-#include <winreg.h>      // 新增注册表操作头文件
+#include <winreg.h>
 #include <cstdlib>
 #include <string>
 #include <cctype>
@@ -36,17 +36,14 @@ static UINT g_dpiX = BASE_DPI;
 static UINT g_dpiY = BASE_DPI;
 static HFONT g_hFont = nullptr;
 
-// 原有函数原型声明
+// 函数原型声明
 bool IsModernUIAvailable();
 void InitDPIScaling(HWND hWnd, bool forceSystemDPI = false);
 void EnableModernFeatures();
 void UpdateLayout(HWND hWnd);
 HFONT CreateDPIFont();
-
-// 新增前向声明，解决 GetRealOSVersion 未声明问题
 void GetRealOSVersion(OSVERSIONINFOA* osvi);
 
-// 为方便服务器版判断，新增辅助函数，通过注册表判断是否为 Server 版本
 bool IsServerEdition() {
     HKEY hKey;
     char installType[32] = {0};
@@ -59,7 +56,6 @@ bool IsServerEdition() {
                              reinterpret_cast<LPBYTE>(installType), &dwSize) == ERROR_SUCCESS)
         {
             RegCloseKey(hKey);
-            // 如果返回的字符串中包含 "Server"，则认为是服务器版
             return (strstr(installType, "Server") != nullptr);
         }
         RegCloseKey(hKey);
@@ -81,18 +77,11 @@ const char* GetWin9xProductName(DWORD dwMinorVersion, DWORD dwBuildNumber) {
     }
 }
 
-/*
-   修改 GetModernWindowsName：
-   针对不同版本，先检测是否为服务器版，若是则从注册表中读取完整的产品名称（如 "Windows Server 2016"），
-   否则返回客户端版本（如 "7"、"8"、"Vista"、"10"、"11" 或 "XP x64"、"Server 2003" 等）。
-*/
 const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
-    // 利用辅助函数判断是否为服务器版
     bool isServerEdition = IsServerEdition();
 
     if (dwMajor == 10) {
         if (isServerEdition) {
-            // 读取注册表中的 ProductName 获取服务器完整名称
             static char sServerName[128] = {0};
             char productName[128] = {0};
             DWORD dwSize = sizeof(productName);
@@ -105,19 +94,16 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
                                  reinterpret_cast<LPBYTE>(productName), &dwSize);
                 RegCloseKey(hKey);
             }
-            // 使用 strncpy 替换 strcpy_s，以兼容 Windows XP
             strncpy(sServerName, productName, sizeof(sServerName) - 1);
             sServerName[sizeof(sServerName) - 1] = '\0';
             return sServerName;
         } else {
-            // 客户版：根据 Build 判断 Windows 10 或 Windows 11
             if (dwBuild >= 22000) return "11";
             if (dwBuild >= 10240) return "10";
         }
     }
     if (dwMajor == 6) {
         if (isServerEdition) {
-            // Windows Vista / Windows 7 时代的服务器版，例如 "Windows Server 2008" 或 "Windows Server 2008 R2"
             static char sServerName[128] = {0};
             char productName[128] = {0};
             DWORD dwSize = sizeof(productName);
@@ -134,7 +120,6 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
             sServerName[sizeof(sServerName) - 1] = '\0';
             return sServerName;
         } else {
-            // 客户版
             switch (dwMinor) {
                 case 3: return "8.1";
                 case 2: return "8";
@@ -146,7 +131,6 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
     if (dwMajor == 5) {
         switch (dwMinor) {
             case 2: {
-                // Windows 5.2：区分 Windows XP x64 与 Server 2003
                 HKEY hKey;
                 char productName[64] = {0};
                 DWORD dwSize = sizeof(productName);
@@ -157,7 +141,6 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
                     RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
                                      reinterpret_cast<LPBYTE>(productName), &dwSize);
                     RegCloseKey(hKey);
-                    // 若产品名称中包含 "XP" 或 "Client"，则为 XP x64 版
                     if (strstr(productName, "XP") || strstr(productName, "Client")) {
                         return "XP x64";
                     }
@@ -168,7 +151,6 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
             case 0: return "2000";
         }
     }
-    // 其他版本则直接返回注册表中的 ProductName
     static char sProductName[128] = {0};
     char productName[128] = {0};
     DWORD dwSize = sizeof(productName);
@@ -186,21 +168,28 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
     return sProductName;
 }
 
-/*
-   修改 GetWindowsVersion：
-   对于 Windows 10 及更高版本，会读取注册表中的 DisplayVersion 键，
-   实现显示功能更新版本号（如“24H2”）。例如，Win11 24H2 将显示为：
-      Windows 11 24H2
-      (Build xxxx)
-   而对于旧版本或无法查询到 DisplayVersion 时，依然使用原有逻辑（包括 Service Pack 等）进行显示。
-*/
 char* GetWindowsVersion() {
     static char szVersion[256]{};
     OSVERSIONINFOA osvi = {0};
     osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
     GetRealOSVersion(&osvi);
 
-    // 从 Service Pack 字段中提取数字后缀，如 " sp2"
+    if (osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 0 && osvi.szCSDVersion[0] == '\0') {
+        char regCSD[64] = "";
+        DWORD size = sizeof(regCSD);
+        HKEY hKey;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                          0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            RegQueryValueExA(hKey, "CSDVersion", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(regCSD), &size);
+            RegCloseKey(hKey);
+        }
+        if (regCSD[0] != '\0') {
+            strncpy(osvi.szCSDVersion, regCSD, sizeof(osvi.szCSDVersion) - 1);
+            osvi.szCSDVersion[sizeof(osvi.szCSDVersion) - 1] = '\0';
+        }
+    }
+
     char spBuffer[64] = "";
     if (osvi.szCSDVersion[0] != '\0') {
         const char* p = osvi.szCSDVersion;
@@ -218,7 +207,6 @@ char* GetWindowsVersion() {
     }
 
     if (osvi.dwPlatformId == VER_PLATFORM_WIN32_WINDOWS) {
-        // 针对 Win9x 系统
         if (const char* product = GetWin9xProductName(osvi.dwMinorVersion, osvi.dwBuildNumber)) {
             if (spBuffer[0] != '\0')
                 sprintf_s(szVersion, sizeof(szVersion), "Windows %s%s\r\n(Build %d.%02d.%04d)",
@@ -235,7 +223,6 @@ char* GetWindowsVersion() {
                           osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
         }
     } else {
-        // 读取 UBR 值（用于精确到小版本，如 26100.2894）
         DWORD ubr = 0;
         HKEY hKey;
         if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
@@ -247,17 +234,14 @@ char* GetWindowsVersion() {
         }
 
         if (const char* product = GetModernWindowsName(osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber)) {
-            // 针对 Windows 10 及更高版本，先尝试读取功能更新版本号
-            if (osvi.dwMajorVersion >= 10) {
+            if (osvi.dwMajorVersion >= 10 && !IsServerEdition()) {
                 char displayVersion[64] = "";
                 HKEY hKey = nullptr;
                 if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
                                   "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
                     DWORD dwSize = sizeof(displayVersion);
-                    // 先尝试读取 DisplayVersion
                     if (RegQueryValueExA(hKey, "DisplayVersion", nullptr, nullptr,
                                           reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
-                        // 如果读取失败，则再尝试读取 ReleaseId
                         dwSize = sizeof(displayVersion);
                         if (RegQueryValueExA(hKey, "ReleaseId", nullptr, nullptr,
                                               reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
@@ -282,7 +266,6 @@ char* GetWindowsVersion() {
                     return szVersion;
                 }
             }
-            // 如果未能读取到功能更新版本号，则继续使用原有逻辑
             bool hasWindowsPrefix = (strncmp(product, "Windows", 7) == 0);
             if (spBuffer[0] != '\0') {
                 if (ubr) {
@@ -419,7 +402,7 @@ bool IsModernUIAvailable() {
 }
 
 HFONT CreateDPIFont() {
-    int fontSize = -MulDiv(18, g_dpiY, 96); // 稍微减小字号
+    int fontSize = -MulDiv(18, g_dpiY, 96);
     const char* fontFace = IsModernUIAvailable() ? "Segoe UI" : "MS Sans Serif";
     DWORD quality = IsModernUIAvailable() ? CLEARTYPE_QUALITY : DEFAULT_QUALITY;
 
@@ -429,10 +412,6 @@ HFONT CreateDPIFont() {
         quality, DEFAULT_PITCH | FF_DONTCARE, fontFace);
 }
 
-/*
-   修改 UpdateLayout：
-   根据系统是否包含 Service Pack，调整文本框和按钮的位置及大小，同时更新文本内容。
-*/
 void UpdateLayout(HWND hWnd) {
     OSVERSIONINFOA osvi = { 0 };
     osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
@@ -449,17 +428,14 @@ void UpdateLayout(HWND hWnd) {
     if (HWND hVersionText = GetDlgItem(hWnd, 0)) {
         int textY, textHeight;
         if (hasSP) {
-            // 有服务包时：文本框从 SCALE_Y(30) 开始，高度为 SCALE_Y(60)
             textY = SCALE_Y(30);
             textHeight = SCALE_Y(60);
         } else {
-            // 无服务包时：恢复原始尺寸，文本框从 SCALE_Y(40) 开始，高度为 SCALE_Y(30)
             textY = SCALE_Y(40);
             textHeight = SCALE_Y(30);
         }
         SetWindowPos(hVersionText, nullptr, SCALE_X(10), textY,
                      SCALE_X(300), textHeight, SWP_NOZORDER);
-        // 重新设置样式：保留 SS_EDITCONTROL 和 SS_MULTILINE（0x20L）
         SetWindowLongPtr(hVersionText, GWL_STYLE,
                            GetWindowLongPtr(hVersionText, GWL_STYLE) | SS_EDITCONTROL | 0x20L);
         SetWindowTextA(hVersionText, GetWindowsVersion());
@@ -468,11 +444,9 @@ void UpdateLayout(HWND hWnd) {
     if (HWND hExitButton = GetDlgItem(hWnd, 1)) {
         int buttonY, buttonWidth;
         if (hasSP) {
-            // 有 SP 时，按钮下移且加宽
             buttonY = SCALE_Y(130);
             buttonWidth = SCALE_X(60);
         } else {
-            // 无 SP 时，恢复原始尺寸
             buttonY = SCALE_Y(100);
             buttonWidth = SCALE_X(50);
         }
@@ -497,7 +471,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         InitDPIScaling(hWnd);
         g_hFont = CreateDPIFont();
 
-        // 创建静态文本框时不使用 SS_CENTERIMAGE，启用多行（SS_MULTILINE，值为 0x20L）
         CreateWindowA("Static", GetWindowsVersion(),
                       WS_CHILD | WS_VISIBLE | SS_CENTER | SS_EDITCONTROL | 0x20L,
                       SCALE_X(10), SCALE_Y(30), SCALE_X(300), SCALE_Y(60),
@@ -573,7 +546,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.lpszClassName = "WinVerClass";
 
     if (!RegisterClassA(&wc)) {
-        MessageBoxA(nullptr, "窗口注册失败！", "错误", MB_ICONERROR);
+        MessageBoxA(nullptr, "Window registration failed!", "Error", MB_ICONERROR);
         return 0;
     }
 
@@ -586,7 +559,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hWnd) {
-        MessageBoxA(nullptr, "窗口创建失败！", "错误", MB_ICONERROR);
+        MessageBoxA(nullptr, "Window creation failed!", "Error", MB_ICONERROR);
         return 0;
     }
 
