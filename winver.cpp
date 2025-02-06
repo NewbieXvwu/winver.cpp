@@ -78,6 +78,12 @@ const char* GetWin9xProductName(DWORD dwMinorVersion, DWORD dwBuildNumber) {
 }
 
 const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
+    // 增加对 Windows NT 4.0 的检测（NT 4.0 的版本号为 4.0，其 dwMajor 小于 5）
+    if (dwMajor < 5) {
+        // 如果为服务器版返回 "Windows NT 4.0 Server"，否则返回 "Windows NT 4.0"
+        return IsServerEdition() ? "Windows NT 4.0 Server" : "Windows NT 4.0";
+    }
+
     bool isServerEdition = IsServerEdition();
 
     if (dwMajor == 10) {
@@ -169,7 +175,7 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
 }
 
 char* GetWindowsVersion() {
-    static char szVersion[256]{};
+    static char szVersion[256] = "";
     OSVERSIONINFOA osvi = {0};
     osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
     GetRealOSVersion(&osvi);
@@ -178,8 +184,10 @@ char* GetWindowsVersion() {
         char regCSD[64] = "";
         DWORD size = sizeof(regCSD);
         HKEY hKey;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                          0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, 
+                          "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                          0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
             RegQueryValueExA(hKey, "CSDVersion", nullptr, nullptr,
                              reinterpret_cast<LPBYTE>(regCSD), &size);
             RegCloseKey(hKey);
@@ -202,25 +210,26 @@ char* GetWindowsVersion() {
                 p++;
             }
             number[i] = '\0';
-            sprintf_s(spBuffer, sizeof(spBuffer), " sp%s", number);
+            // 将 sprintf_s 替换为 sprintf
+            sprintf(spBuffer, " sp%s", number);
         }
     }
 
     if (osvi.dwPlatformId == VER_PLATFORM_WIN32_WINDOWS) {
         if (const char* product = GetWin9xProductName(osvi.dwMinorVersion, osvi.dwBuildNumber)) {
             if (spBuffer[0] != '\0')
-                sprintf_s(szVersion, sizeof(szVersion), "Windows %s%s\r\n(Build %d.%02d.%04d)",
-                          product, spBuffer, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
+                sprintf(szVersion, "Windows %s%s\r\n(Build %d.%02d.%04d)",
+                        product, spBuffer, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
             else
-                sprintf_s(szVersion, sizeof(szVersion), "Windows %s\r\n(Build %d.%02d.%04d)",
-                          product, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
+                sprintf(szVersion, "Windows %s\r\n(Build %d.%02d.%04d)",
+                        product, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
         } else {
             if (spBuffer[0] != '\0')
-                sprintf_s(szVersion, sizeof(szVersion), "Windows %d.%d%s\r\n(Build %d)",
-                          osvi.dwMajorVersion, osvi.dwMinorVersion, spBuffer, osvi.dwBuildNumber & 0xFFFF);
+                sprintf(szVersion, "Windows %d.%d%s\r\n(Build %d)",
+                        osvi.dwMajorVersion, osvi.dwMinorVersion, spBuffer, osvi.dwBuildNumber & 0xFFFF);
             else
-                sprintf_s(szVersion, sizeof(szVersion), "Windows %d.%d\r\n(Build %d)",
-                          osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
+                sprintf(szVersion, "Windows %d.%d\r\n(Build %d)",
+                        osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
         }
     } else {
         DWORD ubr = 0;
@@ -241,10 +250,10 @@ char* GetWindowsVersion() {
                                   "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
                     DWORD dwSize = sizeof(displayVersion);
                     if (RegQueryValueExA(hKey, "DisplayVersion", nullptr, nullptr,
-                                          reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
+                                         reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
                         dwSize = sizeof(displayVersion);
                         if (RegQueryValueExA(hKey, "ReleaseId", nullptr, nullptr,
-                                              reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
+                                             reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
                             displayVersion[0] = '\0';
                         }
                     }
@@ -254,14 +263,14 @@ char* GetWindowsVersion() {
                     bool hasWindowsPrefix = (strncmp(product, "Windows", 7) == 0);
                     if (ubr) {
                         if (hasWindowsPrefix)
-                            sprintf_s(szVersion, sizeof(szVersion), "%s %s\r\n(Build %d.%d)", product, displayVersion, osvi.dwBuildNumber, ubr);
+                            sprintf(szVersion, "%s %s\r\n(Build %d.%d)", product, displayVersion, osvi.dwBuildNumber, ubr);
                         else
-                            sprintf_s(szVersion, sizeof(szVersion), "Windows %s %s\r\n(Build %d.%d)", product, displayVersion, osvi.dwBuildNumber, ubr);
+                            sprintf(szVersion, "Windows %s %s\r\n(Build %d.%d)", product, displayVersion, osvi.dwBuildNumber, ubr);
                     } else {
                         if (hasWindowsPrefix)
-                            sprintf_s(szVersion, sizeof(szVersion), "%s %s\r\n(Build %d)", product, displayVersion, osvi.dwBuildNumber);
+                            sprintf(szVersion, "%s %s\r\n(Build %d)", product, displayVersion, osvi.dwBuildNumber);
                         else
-                            sprintf_s(szVersion, sizeof(szVersion), "Windows %s %s\r\n(Build %d)", product, displayVersion, osvi.dwBuildNumber);
+                            sprintf(szVersion, "Windows %s %s\r\n(Build %d)", product, displayVersion, osvi.dwBuildNumber);
                     }
                     return szVersion;
                 }
@@ -270,35 +279,35 @@ char* GetWindowsVersion() {
             if (spBuffer[0] != '\0') {
                 if (ubr) {
                     if (hasWindowsPrefix)
-                        sprintf_s(szVersion, sizeof(szVersion), "%s%s\r\n(Build %d.%d)", product, spBuffer, osvi.dwBuildNumber, ubr);
+                        sprintf(szVersion, "%s%s\r\n(Build %d.%d)", product, spBuffer, osvi.dwBuildNumber, ubr);
                     else
-                        sprintf_s(szVersion, sizeof(szVersion), "Windows %s%s\r\n(Build %d.%d)", product, spBuffer, osvi.dwBuildNumber, ubr);
+                        sprintf(szVersion, "Windows %s%s\r\n(Build %d.%d)", product, spBuffer, osvi.dwBuildNumber, ubr);
                 } else {
                     if (hasWindowsPrefix)
-                        sprintf_s(szVersion, sizeof(szVersion), "%s%s\r\n(Build %d)", product, spBuffer, osvi.dwBuildNumber);
+                        sprintf(szVersion, "%s%s\r\n(Build %d)", product, spBuffer, osvi.dwBuildNumber);
                     else
-                        sprintf_s(szVersion, sizeof(szVersion), "Windows %s%s\r\n(Build %d)", product, spBuffer, osvi.dwBuildNumber);
+                        sprintf(szVersion, "Windows %s%s\r\n(Build %d)", product, spBuffer, osvi.dwBuildNumber);
                 }
             } else {
                 if (ubr) {
                     if (hasWindowsPrefix)
-                        sprintf_s(szVersion, sizeof(szVersion), "%s\r\n(Build %d.%d)", product, osvi.dwBuildNumber, ubr);
+                        sprintf(szVersion, "%s\r\n(Build %d.%d)", product, osvi.dwBuildNumber, ubr);
                     else
-                        sprintf_s(szVersion, sizeof(szVersion), "Windows %s\r\n(Build %d.%d)", product, osvi.dwBuildNumber, ubr);
+                        sprintf(szVersion, "Windows %s\r\n(Build %d.%d)", product, osvi.dwBuildNumber, ubr);
                 } else {
                     if (hasWindowsPrefix)
-                        sprintf_s(szVersion, sizeof(szVersion), "%s\r\n(Build %d)", product, osvi.dwBuildNumber);
+                        sprintf(szVersion, "%s\r\n(Build %d)", product, osvi.dwBuildNumber);
                     else
-                        sprintf_s(szVersion, sizeof(szVersion), "Windows %s\r\n(Build %d)", product, osvi.dwBuildNumber);
+                        sprintf(szVersion, "Windows %s\r\n(Build %d)", product, osvi.dwBuildNumber);
                 }
             }
         } else {
             if (spBuffer[0] != '\0') {
-                sprintf_s(szVersion, sizeof(szVersion), "Windows NT %d.%d%s\r\n(Build %d)",
-                          osvi.dwMajorVersion, osvi.dwMinorVersion, spBuffer, osvi.dwBuildNumber);
+                sprintf(szVersion, "Windows NT %d.%d%s\r\n(Build %d)",
+                        osvi.dwMajorVersion, osvi.dwMinorVersion, spBuffer, osvi.dwBuildNumber);
             } else {
-                sprintf_s(szVersion, sizeof(szVersion), "Windows NT %d.%d\r\n(Build %d)",
-                          osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
+                sprintf(szVersion, "Windows NT %d.%d\r\n(Build %d)",
+                        osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
             }
         }
     }
