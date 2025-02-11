@@ -7,12 +7,45 @@
 #include <cstdio>
 #include <cstring>
 
+// 删除原有的静态声明
+// #ifndef SetWindowTheme
+// extern "C" HRESULT WINAPI SetWindowTheme(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList);
+// #endif
+
+// 添加 SetWindowTheme 动态加载包装函数
+typedef HRESULT (WINAPI *PFN_SetWindowTheme)(HWND, LPCWSTR, LPCWSTR);
+
+HRESULT SetWindowTheme(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList) {
+    // 静态变量保存加载结果，保证只加载一次
+    static PFN_SetWindowTheme pfnSetWindowTheme = nullptr;
+    static bool bInitialized = false;
+
+    if (!bInitialized) {
+        // 不使用 LOAD_LIBRARY_SEARCH_SYSTEM32，这样在 Win98 下也不会报错
+        HMODULE hUxTheme = LoadLibraryW(L"uxtheme.dll");
+        if (hUxTheme) {
+            pfnSetWindowTheme = reinterpret_cast<PFN_SetWindowTheme>(GetProcAddress(hUxTheme, "SetWindowTheme"));
+        }
+        bInitialized = true;
+    }
+    if (pfnSetWindowTheme) {
+        return pfnSetWindowTheme(hwnd, pszSubAppName, pszSubIdList);
+    }
+    // 加载失败或不存在时返回一个失败码，但不做任何改变
+    return S_FALSE;
+}
+
 #if !defined(WM_DPICHANGED)
 #define WM_DPICHANGED 0x02E0
 #endif
 
 #if !defined(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
+#endif
+
+// 定义沉浸式深色模式的系统属性（新版 Windows 使用）
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
 typedef UINT (WINAPI *GetDpiForWindowProc)(HWND hwnd);
@@ -32,9 +65,18 @@ constexpr int BASE_DPI = 96;
 #define SCALE_X(x) MulDiv(x, g_dpiX, BASE_DPI)
 #define SCALE_Y(x) MulDiv(x, g_dpiY, BASE_DPI)
 
+// 全局 DPI 与字体变量
 static UINT g_dpiX = BASE_DPI;
 static UINT g_dpiY = BASE_DPI;
 static HFONT g_hFont = nullptr;
+static HBRUSH g_lightBrush = nullptr; 
+
+// 以下全局变量用于支持深色模式
+static bool g_darkModeEnabled = false;                   // 是否启用深色模式
+static HBRUSH g_hDarkBrush = nullptr;                      // 深色背景画刷
+static COLORREF g_darkTextColor = RGB(255, 255, 255);        // 深色模式文本颜色（白色）
+static COLORREF g_darkBkColor = RGB(32, 32, 32);             // 深色模式背景颜色（深色）
+static COLORREF g_lightBkColor = RGB(255, 255, 255);         // 浅色模式背景颜色（备用）
 
 // 函数原型声明
 bool IsModernUIAvailable();
@@ -43,6 +85,157 @@ void EnableModernFeatures();
 void UpdateLayout(HWND hWnd);
 HFONT CreateDPIFont();
 void GetRealOSVersion(OSVERSIONINFOA* osvi);
+
+// ----- 支持系统深色模式的代码开始 -----
+//
+// 检查系统是否支持深色模式，通过动态加载 uxtheme.dll 并获取相关 API 地址
+bool IsDarkModeSupported()
+{
+    HMODULE hUxtheme = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (hUxtheme)
+    {
+        // 尝试获取启用深色模式相关函数
+        auto AllowDarkModeForWindow = (BOOL(WINAPI*)(HWND, BOOL))GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
+        auto AllowDarkModeForApp = (BOOL(WINAPI*)(BOOL))GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
+        auto SetPreferredAppMode = (BOOL(WINAPI*)(int))GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
+        FreeLibrary(hUxtheme);
+        return (AllowDarkModeForWindow && AllowDarkModeForApp && SetPreferredAppMode);
+    }
+    return false;
+}
+
+// 启用深色模式：通过动态加载函数以及 DwmSetWindowAttribute API 应用沉浸式深色模式
+// 修改后的 EnableDarkMode 函数
+void EnableDarkMode(HWND hwnd) {
+    // 定义函数指针类型
+    typedef BOOL (WINAPI *FnAllowDarkModeForWindow)(HWND, BOOL);
+    typedef BOOL (WINAPI *FnAllowDarkModeForApp)(BOOL);
+    typedef BOOL (WINAPI *FnSetPreferredAppMode)(int);
+    typedef HRESULT (WINAPI *FnDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+    
+    HMODULE hUxtheme = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (hUxtheme) {
+        FnAllowDarkModeForWindow pAllowDarkModeForWindow = 
+            (FnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
+        FnAllowDarkModeForApp pAllowDarkModeForApp = 
+            (FnAllowDarkModeForApp)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
+        FnSetPreferredAppMode pSetPreferredAppMode = 
+            (FnSetPreferredAppMode)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
+        
+        if (pAllowDarkModeForWindow && pAllowDarkModeForApp && pSetPreferredAppMode) {
+            // 启用全局深色模式
+            pAllowDarkModeForApp(TRUE);
+            pSetPreferredAppMode(1); // 允许深色模式（1 = AllowDark）
+            pAllowDarkModeForWindow(hwnd, TRUE);
+            
+            BOOL useDarkMode = TRUE;
+            // 修正：动态加载 dwmapi.dll 中的 DwmSetWindowAttribute 函数以避免编译错误
+            HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+            if (hDwm) {
+                FnDwmSetWindowAttribute pDwmSetWindowAttribute = 
+                    (FnDwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+                if (pDwmSetWindowAttribute) {
+                    pDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
+                }
+                FreeLibrary(hDwm);
+            }
+        }
+        FreeLibrary(hUxtheme);
+    }
+}
+
+// 根据注册表设置和系统支持情况应用深色模式
+// 修改 ApplyDarkModeSettings 函数
+void ApplyDarkModeSettings(HWND hwnd)
+{
+    // 仅在现代系统中尝试（兼容 Win9x 至 Win11，旧系统不支持深色模式）
+    if (!IsModernUIAvailable())
+        return;
+        
+    // 保存旧的深色模式状态
+    bool oldDarkModeEnabled = g_darkModeEnabled;
+    
+    HKEY hKey;
+    // 从注册表读取 "Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" 中的 AppsUseLightTheme 配置
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD dwType = REG_DWORD;
+        DWORD dwData = 0;
+        DWORD dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"AppsUseLightTheme", nullptr, &dwType, (LPBYTE)&dwData, &dwSize) == ERROR_SUCCESS)
+        {
+            // 0 表示启用深色模式
+            g_darkModeEnabled = (dwData == 0);
+        }
+        RegCloseKey(hKey);
+    }
+    
+    // 如果深色模式状态发生变化，需要更新窗口
+    if (g_darkModeEnabled != oldDarkModeEnabled) {
+        // 删除旧的画刷
+        if (g_lightBrush) {
+            DeleteObject(g_lightBrush);
+            g_lightBrush = nullptr;
+        }
+        if (g_hDarkBrush) {
+            DeleteObject(g_hDarkBrush);
+            g_hDarkBrush = nullptr;
+        }
+
+        if (g_darkModeEnabled)
+        {
+            // 启用深色模式
+            EnableDarkMode(hwnd);
+            
+            // 创建深色背景画刷
+            g_hDarkBrush = CreateSolidBrush(g_darkBkColor);
+            
+            // 修改窗口类背景，保证整个窗口背景为深色
+            SetClassLongPtrA(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_hDarkBrush);
+            
+            // 对部分子控件应用深色模式主题，替换为 SetWindowTheme 调用
+            HWND hStatic = GetDlgItem(hwnd, 0);
+            if (hStatic)
+                SetWindowTheme(hStatic, L"DarkMode_Explorer", nullptr);
+            HWND hButton = GetDlgItem(hwnd, 1);
+            if (hButton)
+                SetWindowTheme(hButton, L"DarkMode_Explorer", nullptr);
+        }
+        else
+        {
+            // 恢复浅色模式
+            BOOL useDarkMode = FALSE;
+            HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+            if (hDwm) {
+                typedef HRESULT (WINAPI *FnDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+                FnDwmSetWindowAttribute pDwmSetWindowAttribute = 
+                    (FnDwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+                if (pDwmSetWindowAttribute) {
+                    pDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
+                }
+                FreeLibrary(hDwm);
+            }
+            
+            // 恢复默认背景
+            SetClassLongPtrA(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(COLOR_BTNFACE + 1));
+            
+            // 创建浅色背景画刷
+            g_lightBrush = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
+            
+            // 恢复控件默认主题，使用 SetWindowTheme 将主题置空
+            HWND hStatic = GetDlgItem(hwnd, 0);
+            if (hStatic)
+                SetWindowTheme(hStatic, L"", nullptr);
+            HWND hButton = GetDlgItem(hwnd, 1);
+            if (hButton)
+                SetWindowTheme(hButton, L"", nullptr);
+        }
+    }
+}
+//
+// ----- 支持深色模式的代码结束 -----
+
 
 bool IsServerEdition() {
     HKEY hKey;
@@ -73,17 +266,12 @@ const char* GetWin9xProductName(DWORD dwMinorVersion, DWORD dwBuildNumber) {
         case 0: return "95";
         case 10: return (dwBuildNumber & 0xFFFF) >= 2222 ? "98 SE" : "98";
         case 90: return "Me";
-        default: return nullptr;
+        default: return "Unknown";
     }
 }
 
 const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
-    // 增加对 Windows NT 4.0 的检测（NT 4.0 的版本号为 4.0，其 dwMajor 小于 5）
-    if (dwMajor < 5) {
-        // 如果为服务器版返回 "Windows NT 4.0 Server"，否则返回 "Windows NT 4.0"
-        return IsServerEdition() ? "Windows NT 4.0 Server" : "Windows NT 4.0";
-    }
-
+    
     bool isServerEdition = IsServerEdition();
 
     if (dwMajor == 10) {
@@ -105,7 +293,7 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
             return sServerName;
         } else {
             if (dwBuild >= 22000) return "11";
-            if (dwBuild >= 10240) return "10";
+            else return "10";
         }
     }
     if (dwMajor == 6) {
@@ -156,6 +344,12 @@ const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
             case 1: return "XP";
             case 0: return "2000";
         }
+    }
+    if (dwMajor = 4) {
+        return isServerEdition ? "Windows NT 4.0 Server" : "Windows NT 4.0";
+    }
+    if (dwMajor = 3) {
+        return isServerEdition ? "Windows NT 3 Server" : "Windows NT 3";
     }
     static char sProductName[128] = {0};
     char productName[128] = {0};
@@ -210,7 +404,6 @@ char* GetWindowsVersion() {
                 p++;
             }
             number[i] = '\0';
-            // 将 sprintf_s 替换为 sprintf
             sprintf(spBuffer, " sp%s", number);
         }
     }
@@ -491,6 +684,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         if (g_hFont)
             EnumChildWindows(hWnd, SetChildFont, reinterpret_cast<LPARAM>(g_hFont));
+            
+        // 调用深色模式设置（若用户注册表启用了深色模式则自动应用）
+        ApplyDarkModeSettings(hWnd);
         break;
     }
     case WM_DPICHANGED: {
@@ -517,6 +713,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                      RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
         return 0;
     }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdcStatic = reinterpret_cast<HDC>(wParam);
+        if (g_darkModeEnabled)
+        {
+            SetTextColor(hdcStatic, g_darkTextColor);
+            SetBkColor(hdcStatic, g_darkBkColor);
+            return (INT_PTR)g_hDarkBrush;
+        }
+        else
+        {
+            SetTextColor(hdcStatic, GetSysColor(COLOR_WINDOWTEXT));
+            SetBkColor(hdcStatic, GetSysColor(COLOR_BTNFACE));
+            return (INT_PTR)g_lightBrush;
+        }
+    }
+
+    case WM_CTLCOLORBTN: {
+        HDC hdcButton = reinterpret_cast<HDC>(wParam);
+        if (g_darkModeEnabled)
+        {
+            SetTextColor(hdcButton, g_darkTextColor);
+            SetBkColor(hdcButton, g_darkBkColor);
+            return (INT_PTR)g_hDarkBrush;
+        }
+        else
+        {
+            SetTextColor(hdcButton, GetSysColor(COLOR_WINDOWTEXT));
+            SetBkColor(hdcButton, GetSysColor(COLOR_BTNFACE));
+            return (INT_PTR)g_lightBrush;
+        }
+    }
+
     case WM_COMMAND:
         if (LOWORD(wParam) == 1)
             PostQuitMessage(0);
@@ -524,8 +752,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         if (g_hFont)
             DeleteObject(g_hFont);
+        // 释放深色和浅色背景画刷，避免内存泄漏
+        if (g_hDarkBrush) {
+            DeleteObject(g_hDarkBrush);
+            g_hDarkBrush = nullptr;
+        }
+        if (g_lightBrush) {
+            DeleteObject(g_lightBrush);
+            g_lightBrush = nullptr;
+        }
         PostQuitMessage(0);
         break;
+    case WM_SETTINGCHANGE: {
+        // 检查是否是主题相关的设置更改
+        if (lParam && lstrcmpiA((LPCSTR)lParam, "ImmersiveColorSet") == 0) {
+            // 重新应用深色模式设置
+            ApplyDarkModeSettings(hWnd);
+            
+            // 强制重绘整个窗口
+            RedrawWindow(hWnd, nullptr, nullptr,
+                RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
+        break;
+    }
     default:
         return DefWindowProcA(hWnd, message, wParam, lParam);
     }
@@ -559,9 +808,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 0;
     }
 
+    char szTitle[128] = "Windows Version";
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                     "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+       DWORD dwSize = sizeof(szTitle);
+       RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
+                        reinterpret_cast<LPBYTE>(szTitle), &dwSize);
+       RegCloseKey(hKey);
+    }
+    if (strstr(szTitle, "Enterprise LTSC") != nullptr) {
+        if (strstr(szTitle, "2024") != nullptr && strncmp(szTitle, "Windows 10", 10) == 0) {
+            szTitle[8] = '1';
+            szTitle[9] = '1';
+        }
+        char* pos = strstr(szTitle, "Enterprise LTSC");
+        if (pos != nullptr) {
+            memmove(pos, pos + 11, strlen(pos + 11) + 1);
+        }
+    }
+
     HWND hWnd = CreateWindowA(
         "WinVerClass", 
-        "Windows Version",
+        szTitle,
         WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX),
         CW_USEDEFAULT, CW_USEDEFAULT, 
         rc.right - rc.left, rc.bottom - rc.top,
