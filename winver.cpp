@@ -615,45 +615,32 @@ HFONT CreateDPIFont() {
 }
 
 void UpdateLayout(HWND hWnd) {
-    OSVERSIONINFOA osvi = { 0 };
-    osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
-    GetRealOSVersion(&osvi);
-    bool hasSP = false;
-    if (osvi.szCSDVersion[0] != '\0') {
-        const char* p = osvi.szCSDVersion;
-        while (*p && !isdigit(*p)) { ++p; }
-        if (*p && *p != '0') {
-            hasSP = true;
-        }
-    }
+    const char* versionStr = GetWindowsVersion();
+    bool isMultiline = (strstr(versionStr, "\r\n") != nullptr || strchr(versionStr, '\n') != nullptr);
 
     if (HWND hVersionText = GetDlgItem(hWnd, 0)) {
-        int textY, textHeight;
-        if (hasSP) {
-            textY = SCALE_Y(30);
-            textHeight = SCALE_Y(60);
-        } else {
-            textY = SCALE_Y(40);
-            textHeight = SCALE_Y(30);
-        }
+        int textHeight = isMultiline ? SCALE_Y(60) : SCALE_Y(30);
+        int textY = isMultiline ? SCALE_Y(30) : SCALE_Y(40);
+        
         SetWindowPos(hVersionText, nullptr, SCALE_X(10), textY,
                      SCALE_X(300), textHeight, SWP_NOZORDER);
         SetWindowLongPtr(hVersionText, GWL_STYLE,
-                           GetWindowLongPtr(hVersionText, GWL_STYLE) | SS_EDITCONTROL | 0x20L);
-        SetWindowTextA(hVersionText, GetWindowsVersion());
+                         WS_CHILD | WS_VISIBLE | SS_CENTER | SS_EDITCONTROL);
+        SetWindowTextA(hVersionText, versionStr);
     }
 
     if (HWND hExitButton = GetDlgItem(hWnd, 1)) {
-        int buttonY, buttonWidth;
-        if (hasSP) {
-            buttonY = SCALE_Y(130);
-            buttonWidth = SCALE_X(60);
-        } else {
-            buttonY = SCALE_Y(100);
-            buttonWidth = SCALE_X(50);
-        }
-        SetWindowPos(hExitButton, nullptr, (SCALE_X(320) - buttonWidth) / 2, buttonY,
-                     buttonWidth, SCALE_Y(35), SWP_NOZORDER);
+        int buttonY = isMultiline ? 
+            (SCALE_Y(30) + SCALE_Y(60) + SCALE_Y(20)) : 
+            SCALE_Y(100);
+        int buttonWidth = isMultiline ? SCALE_X(60) : SCALE_X(50);
+
+        SetWindowPos(hExitButton, nullptr, 
+                    (SCALE_X(320) - buttonWidth) / 2,
+                    buttonY,
+                    buttonWidth, 
+                    SCALE_Y(35), 
+                    SWP_NOZORDER);
     }
     
     SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
@@ -663,6 +650,7 @@ void UpdateLayout(HWND hWnd) {
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE: {
+        // 创建控件及初始化等代码保持不变
         if (IsModernUIAvailable()) {
             BOOL fontSmoothing = TRUE;
             SystemParametersInfo(SPI_SETFONTSMOOTHING, TRUE, &fontSmoothing, 0);
@@ -674,13 +662,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         g_hFont = CreateDPIFont();
 
         CreateWindowA("Static", GetWindowsVersion(),
-                      WS_CHILD | WS_VISIBLE | SS_CENTER | SS_EDITCONTROL | 0x20L,
-                      SCALE_X(10), SCALE_Y(30), SCALE_X(300), SCALE_Y(60),
-                      hWnd, nullptr, nullptr, nullptr);
+              WS_CHILD | WS_VISIBLE | SS_CENTER | SS_EDITCONTROL,
+              SCALE_X(10), SCALE_Y(30), SCALE_X(300), SCALE_Y(60),
+              hWnd, nullptr, nullptr, nullptr);
+
+        // 统一使用 UpdateLayout 中的位置计算逻辑创建按钮
+        bool isInitialMultiline = strstr(GetWindowsVersion(), "\r\n") != nullptr;
+        int initialButtonY = isInitialMultiline ? 
+            (SCALE_Y(30) + SCALE_Y(60) + SCALE_Y(20)) : 
+            SCALE_Y(100);
+        int initialButtonWidth = isInitialMultiline ? SCALE_X(60) : SCALE_X(50);
 
         CreateWindowA("Button", "OK", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                      (SCALE_X(320) - SCALE_X(60)) / 2, SCALE_Y(100),
-                      SCALE_X(60), SCALE_Y(35), hWnd, (HMENU)1, nullptr, nullptr);
+                      (SCALE_X(320) - initialButtonWidth) / 2, initialButtonY,
+                      initialButtonWidth, SCALE_Y(35), hWnd, (HMENU)1, nullptr, nullptr);
 
         if (g_hFont)
             EnumChildWindows(hWnd, SetChildFont, reinterpret_cast<LPARAM>(g_hFont));
@@ -696,8 +691,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                      prcNewWindow->bottom - prcNewWindow->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
 
-        g_dpiX = HIWORD(wParam);
-        g_dpiY = LOWORD(wParam);
+        // 修改处：正确设置水平与垂直 DPI 的顺序
+        g_dpiX = LOWORD(wParam); // 低位为水平 DPI
+        g_dpiY = HIWORD(wParam); // 高位为垂直 DPI
         
         if (g_hFont)
             DeleteObject(g_hFont);
@@ -715,20 +711,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
     case WM_CTLCOLORSTATIC: {
         HDC hdcStatic = reinterpret_cast<HDC>(wParam);
-        if (g_darkModeEnabled)
-        {
+        if (g_darkModeEnabled) {
             SetTextColor(hdcStatic, g_darkTextColor);
             SetBkColor(hdcStatic, g_darkBkColor);
+            SetBkMode(hdcStatic, TRANSPARENT);  // 新增：设置透明背景模式
             return (INT_PTR)g_hDarkBrush;
-        }
-        else
-        {
+        } else {
             SetTextColor(hdcStatic, GetSysColor(COLOR_WINDOWTEXT));
             SetBkColor(hdcStatic, GetSysColor(COLOR_BTNFACE));
-            return (INT_PTR)g_lightBrush;
+            SetBkMode(hdcStatic, OPAQUE);  // 新增：强制使用不透明背景
+            return (INT_PTR)(g_lightBrush ? g_lightBrush : GetSysColorBrush(COLOR_BTNFACE));
         }
     }
-
+    case WM_CTLCOLOREDIT: {
+        HDC hdcEdit = reinterpret_cast<HDC>(wParam);
+        if (g_darkModeEnabled) {
+            SetTextColor(hdcEdit, g_darkTextColor);
+            SetBkColor(hdcEdit, g_darkBkColor);
+            SetBkMode(hdcEdit, TRANSPARENT);  // 新增：设置透明背景模式
+            return (INT_PTR)g_hDarkBrush;
+        } else {
+            SetTextColor(hdcEdit, GetSysColor(COLOR_WINDOWTEXT));
+            SetBkColor(hdcEdit, GetSysColor(COLOR_BTNFACE));
+            SetBkMode(hdcEdit, OPAQUE);  // 新增：强制使用不透明背景
+            return (INT_PTR)(g_lightBrush ? g_lightBrush : GetSysColorBrush(COLOR_BTNFACE));
+        }
+    }
     case WM_CTLCOLORBTN: {
         HDC hdcButton = reinterpret_cast<HDC>(wParam);
         if (g_darkModeEnabled)
@@ -744,7 +752,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             return (INT_PTR)g_lightBrush;
         }
     }
-
     case WM_COMMAND:
         if (LOWORD(wParam) == 1)
             PostQuitMessage(0);
