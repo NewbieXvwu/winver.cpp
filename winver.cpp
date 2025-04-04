@@ -1,3 +1,7 @@
+// 编译命令:
+// windres --input-format=rc --output-format=coff --target=pe-i386 winver.rc -o winver.res
+// i686-w64-mingw32-g++ -o winver.exe winver.cpp winver.res -mwindows -march=i486 -std=gnu++17 -D_WIN32_WINDOWS=0x0400 -Wl,--subsystem=windows -static-libgcc -static-libstdc++ -static -lcomctl32 -lkernel32 -luser32 -ladvapi32 -lgdi32 -lole32 -lshlwapi
+
 #include <windows.h>
 #include <commctrl.h>
 #include <winreg.h>
@@ -6,134 +10,161 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <shlwapi.h>
 
-// 删除原有的静态声明
-// #ifndef SetWindowTheme
-// extern "C" HRESULT WINAPI SetWindowTheme(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList);
-// #endif
+#pragma comment(lib, "shlwapi.lib")
 
-// 添加 SetWindowTheme 动态加载包装函数
+// GDI+ 函数指针类型和常量
+typedef int Status;
+typedef Status GpStatus;
+
+#define Ok 0
+#define InvalidParameter 2
+
+struct GdiplusStartupInput {
+    UINT32 GdiplusVersion;
+    void* DebugEventCallback;
+    BOOL SuppressBackgroundThread;
+    BOOL SuppressExternalCodecs;
+    GdiplusStartupInput() : GdiplusVersion(1), DebugEventCallback(NULL), SuppressBackgroundThread(FALSE), SuppressExternalCodecs(FALSE) {}
+};
+
+typedef Status (WINAPI *FuncGdiplusStartup)(ULONG_PTR*, const GdiplusStartupInput*, void*);
+typedef void (WINAPI *FuncGdiplusShutdown)(ULONG_PTR);
+typedef Status (WINAPI *FuncGdipCreateBitmapFromStream)(void*, void**);
+typedef Status (WINAPI *FuncGdipGetImageWidth)(void*, UINT*);
+typedef Status (WINAPI *FuncGdipGetImageHeight)(void*, UINT*);
+typedef Status (WINAPI *FuncGdipDisposeImage)(void*);
+typedef Status (WINAPI *FuncGdipCreateFromHDC)(HDC, void**);
+typedef Status (WINAPI *FuncGdipSetSmoothingMode)(void*, int);
+typedef Status (WINAPI *FuncGdipSetInterpolationMode)(void*, int);
+typedef Status (WINAPI *FuncGdipDrawImageRectI)(void*, void*, int, int, int, int);
+typedef Status (WINAPI *FuncGdipDeleteGraphics)(void*);
+
+// 全局函数指针类型定义
+typedef HRESULT (WINAPI *FnDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+typedef UINT (WINAPI *GetDpiForWindowProc)(HWND);
+typedef UINT (WINAPI *GetDpiForSystemProc)(void);
+typedef BOOL (WINAPI *SetProcessDPIAwareProc)(void);
+typedef HRESULT (WINAPI *SetProcessDPIAwarenessProc)(int);
+typedef BOOL (WINAPI *SetProcessDPIAwarenessContextProc)(HANDLE);
+typedef BOOL (WINAPI *IsWow64ProcessProc)(HANDLE, PBOOL);
 typedef HRESULT (WINAPI *PFN_SetWindowTheme)(HWND, LPCWSTR, LPCWSTR);
 
-HRESULT SetWindowTheme(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList) {
-    // 静态变量保存加载结果，保证只加载一次
-    static PFN_SetWindowTheme pfnSetWindowTheme = nullptr;
-    static bool bInitialized = false;
+static FuncGdiplusStartup GdiplusStartup = NULL;
+static FuncGdiplusShutdown GdiplusShutdown = NULL;
+static FuncGdipCreateBitmapFromStream GdipCreateBitmapFromStream = NULL;
+static FuncGdipGetImageWidth GdipGetImageWidth = NULL;
+static FuncGdipGetImageHeight GdipGetImageHeight = NULL;
+static FuncGdipDisposeImage GdipDisposeImage = NULL;
+static FuncGdipCreateFromHDC GdipCreateFromHDC = NULL;
+static FuncGdipSetSmoothingMode GdipSetSmoothingMode = NULL;
+static FuncGdipSetInterpolationMode GdipSetInterpolationMode = NULL;
+static FuncGdipDrawImageRectI GdipDrawImageRectI = NULL;
+static FuncGdipDeleteGraphics GdipDeleteGraphics = NULL;
 
+enum SmoothingMode {
+    SmoothingModeHighQuality = 2,
+    SmoothingModeAntiAlias = 4
+};
+
+enum InterpolationMode {
+    InterpolationModeHighQualityBicubic = 7
+};
+
+// SetWindowTheme 动态加载
+static PFN_SetWindowTheme pfnSetWindowTheme = nullptr;
+
+HRESULT SetWindowTheme(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList) {
+    static bool bInitialized = false;
     if (!bInitialized) {
-        // 不使用 LOAD_LIBRARY_SEARCH_SYSTEM32，这样在 Win98 下也不会报错
-        HMODULE hUxTheme = LoadLibraryW(L"uxtheme.dll");
+        HMODULE hUxTheme = LoadLibraryA("uxtheme.dll");
         if (hUxTheme) {
-            pfnSetWindowTheme = reinterpret_cast<PFN_SetWindowTheme>(GetProcAddress(hUxTheme, "SetWindowTheme"));
+            pfnSetWindowTheme = (PFN_SetWindowTheme)GetProcAddress(hUxTheme, "SetWindowTheme");
         }
         bInitialized = true;
     }
     if (pfnSetWindowTheme) {
         return pfnSetWindowTheme(hwnd, pszSubAppName, pszSubIdList);
     }
-    // 加载失败或不存在时返回一个失败码，但不做任何改变
     return S_FALSE;
 }
 
-#if !defined(WM_DPICHANGED)
+#ifndef WM_DPICHANGED
 #define WM_DPICHANGED 0x02E0
 #endif
 
-#if !defined(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
-#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
-#endif
-
-// 定义沉浸式深色模式的系统属性（新版 Windows 使用）
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
-
-typedef UINT (WINAPI *GetDpiForWindowProc)(HWND hwnd);
-typedef UINT (WINAPI *GetDpiForSystemProc)(void);
-
-typedef enum _PROCESS_DPI_AWARENESS {
-    PROCESS_DPI_UNAWARE = 0,
-    PROCESS_SYSTEM_DPI_AWARE = 1,
-    PROCESS_PER_MONITOR_DPI_AWARE = 2
-} PROCESS_DPI_AWARENESS;
-
-typedef BOOL    (WINAPI *SetProcessDPIAwareProc)(void);
-typedef HRESULT (WINAPI *SetProcessDPIAwarenessProc)(PROCESS_DPI_AWARENESS);
-typedef BOOL    (WINAPI *SetProcessDPIAwarenessContextProc)(DPI_AWARENESS_CONTEXT);
 
 constexpr int BASE_DPI = 96;
 #define SCALE_X(x) MulDiv(x, g_dpiX, BASE_DPI)
 #define SCALE_Y(x) MulDiv(x, g_dpiY, BASE_DPI)
 
-// 全局 DPI 与字体变量
+// 全局变量
 static UINT g_dpiX = BASE_DPI;
 static UINT g_dpiY = BASE_DPI;
 static HFONT g_hFont = nullptr;
-static HBRUSH g_lightBrush = nullptr; 
+static HBRUSH g_lightBrush = nullptr;
+static bool g_darkModeEnabled = false;
+static HBRUSH g_hDarkBrush = nullptr;
+static COLORREF g_darkTextColor = RGB(255, 255, 255);
+static COLORREF g_darkBkColor = RGB(32, 32, 32);
+static COLORREF g_lightBkColor = RGB(255, 255, 255);
+static GdiplusStartupInput gdiplusStartupInput;
+static ULONG_PTR gdiplusToken = 0;
+static void* g_pLogoImage = nullptr;
+static int g_logoWidth = 0;
+static int g_logoHeight = 0;
+static bool g_logoLoaded = false;
+static bool g_gdiplusInitialized = false;
+static HMODULE g_hGdiPlus = NULL;
 
-// 以下全局变量用于支持深色模式
-static bool g_darkModeEnabled = false;                   // 是否启用深色模式
-static HBRUSH g_hDarkBrush = nullptr;                      // 深色背景画刷
-static COLORREF g_darkTextColor = RGB(255, 255, 255);        // 深色模式文本颜色（白色）
-static COLORREF g_darkBkColor = RGB(32, 32, 32);             // 深色模式背景颜色（深色）
-static COLORREF g_lightBkColor = RGB(255, 255, 255);         // 浅色模式背景颜色（备用）
-
-// 函数原型声明
+// 函数声明
 bool IsModernUIAvailable();
 void InitDPIScaling(HWND hWnd, bool forceSystemDPI = false);
 void EnableModernFeatures();
 void UpdateLayout(HWND hWnd);
 HFONT CreateDPIFont();
 void GetRealOSVersion(OSVERSIONINFOA* osvi);
+bool LoadWindowsLogo();
+void DrawWindowsLogo(HDC hdc, int x, int y, int width, int height);
+bool Is64BitOS();
+bool CanLoad64BitModules();
+bool InitializeGdiplus();
+void ShutdownGdiplus();
+void EnableDarkMode(HWND hwnd);
+void ApplyDarkModeSettings(HWND hwnd);
 
-// ----- 支持系统深色模式的代码开始 -----
-//
-// 检查系统是否支持深色模式，通过动态加载 uxtheme.dll 并获取相关 API 地址
-bool IsDarkModeSupported()
-{
-    HMODULE hUxtheme = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (hUxtheme)
-    {
-        // 尝试获取启用深色模式相关函数
+bool IsDarkModeSupported() {
+    HMODULE hUxtheme = LoadLibraryA("uxtheme.dll");
+    if (hUxtheme) {
         auto AllowDarkModeForWindow = (BOOL(WINAPI*)(HWND, BOOL))GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
-        auto AllowDarkModeForApp = (BOOL(WINAPI*)(BOOL))GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
         auto SetPreferredAppMode = (BOOL(WINAPI*)(int))GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
         FreeLibrary(hUxtheme);
-        return (AllowDarkModeForWindow && AllowDarkModeForApp && SetPreferredAppMode);
+        return (AllowDarkModeForWindow && SetPreferredAppMode);
     }
     return false;
 }
 
-// 启用深色模式：通过动态加载函数以及 DwmSetWindowAttribute API 应用沉浸式深色模式
-// 修改后的 EnableDarkMode 函数
 void EnableDarkMode(HWND hwnd) {
-    // 定义函数指针类型
     typedef BOOL (WINAPI *FnAllowDarkModeForWindow)(HWND, BOOL);
-    typedef BOOL (WINAPI *FnAllowDarkModeForApp)(BOOL);
     typedef BOOL (WINAPI *FnSetPreferredAppMode)(int);
-    typedef HRESULT (WINAPI *FnDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-    
-    HMODULE hUxtheme = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    HMODULE hUxtheme = LoadLibraryA("uxtheme.dll");
     if (hUxtheme) {
-        FnAllowDarkModeForWindow pAllowDarkModeForWindow = 
-            (FnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
-        FnAllowDarkModeForApp pAllowDarkModeForApp = 
-            (FnAllowDarkModeForApp)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
-        FnSetPreferredAppMode pSetPreferredAppMode = 
-            (FnSetPreferredAppMode)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
-        
-        if (pAllowDarkModeForWindow && pAllowDarkModeForApp && pSetPreferredAppMode) {
-            // 启用全局深色模式
-            pAllowDarkModeForApp(TRUE);
-            pSetPreferredAppMode(1); // 允许深色模式（1 = AllowDark）
+        FnAllowDarkModeForWindow pAllowDarkModeForWindow = (FnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
+        FnSetPreferredAppMode pSetPreferredAppMode = (FnSetPreferredAppMode)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
+
+        if (pAllowDarkModeForWindow && pSetPreferredAppMode) {
+            pSetPreferredAppMode(1); // AllowDark
             pAllowDarkModeForWindow(hwnd, TRUE);
-            
+
             BOOL useDarkMode = TRUE;
-            // 修正：动态加载 dwmapi.dll 中的 DwmSetWindowAttribute 函数以避免编译错误
             HMODULE hDwm = LoadLibraryA("dwmapi.dll");
             if (hDwm) {
-                FnDwmSetWindowAttribute pDwmSetWindowAttribute = 
-                    (FnDwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+                FnDwmSetWindowAttribute pDwmSetWindowAttribute = (FnDwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
                 if (pDwmSetWindowAttribute) {
                     pDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
                 }
@@ -144,110 +175,212 @@ void EnableDarkMode(HWND hwnd) {
     }
 }
 
-// 根据注册表设置和系统支持情况应用深色模式
-// 修改 ApplyDarkModeSettings 函数
-void ApplyDarkModeSettings(HWND hwnd)
-{
-    // 仅在现代系统中尝试（兼容 Win9x 至 Win11，旧系统不支持深色模式）
-    if (!IsModernUIAvailable())
-        return;
-        
-    // 保存旧的深色模式状态
+void ApplyDarkModeSettings(HWND hwnd) {
+    if (!IsModernUIAvailable()) return;
+
     bool oldDarkModeEnabled = g_darkModeEnabled;
-    
     HKEY hKey;
-    // 从注册表读取 "Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" 中的 AppsUseLightTheme 配置
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 
-                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        DWORD dwType = REG_DWORD;
-        DWORD dwData = 0;
-        DWORD dwSize = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"AppsUseLightTheme", nullptr, &dwType, (LPBYTE)&dwData, &dwSize) == ERROR_SUCCESS)
-        {
-            // 0 表示启用深色模式
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dwType = REG_DWORD, dwData = 0, dwSize = sizeof(DWORD);
+        if (RegQueryValueExA(hKey, "AppsUseLightTheme", nullptr, &dwType, (LPBYTE)&dwData, &dwSize) == ERROR_SUCCESS) {
             g_darkModeEnabled = (dwData == 0);
         }
         RegCloseKey(hKey);
     }
-    
-    // 如果深色模式状态发生变化，需要更新窗口
-    if (g_darkModeEnabled != oldDarkModeEnabled) {
-        // 删除旧的画刷
-        if (g_lightBrush) {
-            DeleteObject(g_lightBrush);
-            g_lightBrush = nullptr;
-        }
-        if (g_hDarkBrush) {
-            DeleteObject(g_hDarkBrush);
-            g_hDarkBrush = nullptr;
-        }
 
-        if (g_darkModeEnabled)
-        {
-            // 启用深色模式
+    if (g_darkModeEnabled != oldDarkModeEnabled) {
+        if (g_lightBrush) { DeleteObject(g_lightBrush); g_lightBrush = nullptr; }
+        if (g_hDarkBrush) { DeleteObject(g_hDarkBrush); g_hDarkBrush = nullptr; }
+
+        if (g_darkModeEnabled) {
             EnableDarkMode(hwnd);
-            
-            // 创建深色背景画刷
             g_hDarkBrush = CreateSolidBrush(g_darkBkColor);
-            
-            // 修改窗口类背景，保证整个窗口背景为深色
             SetClassLongPtrA(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_hDarkBrush);
-            
-            // 对部分子控件应用深色模式主题，替换为 SetWindowTheme 调用
+
             HWND hStatic = GetDlgItem(hwnd, 0);
-            if (hStatic)
-                SetWindowTheme(hStatic, L"DarkMode_Explorer", nullptr);
+            if (hStatic) SetWindowTheme(hStatic, L"DarkMode_Explorer", nullptr);
             HWND hButton = GetDlgItem(hwnd, 1);
-            if (hButton)
-                SetWindowTheme(hButton, L"DarkMode_Explorer", nullptr);
-        }
-        else
-        {
-            // 恢复浅色模式
+            if (hButton) SetWindowTheme(hButton, L"DarkMode_Explorer", nullptr);
+        } else {
             BOOL useDarkMode = FALSE;
             HMODULE hDwm = LoadLibraryA("dwmapi.dll");
             if (hDwm) {
-                typedef HRESULT (WINAPI *FnDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-                FnDwmSetWindowAttribute pDwmSetWindowAttribute = 
-                    (FnDwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+                FnDwmSetWindowAttribute pDwmSetWindowAttribute = (FnDwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
                 if (pDwmSetWindowAttribute) {
                     pDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
                 }
                 FreeLibrary(hDwm);
             }
-            
-            // 恢复默认背景
             SetClassLongPtrA(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(COLOR_BTNFACE + 1));
-            
-            // 创建浅色背景画刷
-            g_lightBrush = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
-            
-            // 恢复控件默认主题，使用 SetWindowTheme 将主题置空
+            g_lightBrush = CreateSolidBrush(g_lightBkColor);
+
             HWND hStatic = GetDlgItem(hwnd, 0);
-            if (hStatic)
-                SetWindowTheme(hStatic, L"", nullptr);
+            if (hStatic) SetWindowTheme(hStatic, L"", nullptr);
             HWND hButton = GetDlgItem(hwnd, 1);
-            if (hButton)
-                SetWindowTheme(hButton, L"", nullptr);
+            if (hButton) SetWindowTheme(hButton, L"", nullptr);
         }
+        InvalidateRect(hwnd, nullptr, TRUE);
     }
 }
-//
-// ----- 支持深色模式的代码结束 -----
 
+bool InitializeGdiplus() {
+    if (g_gdiplusInitialized) return true;
+
+    OSVERSIONINFOA osvi = { sizeof(OSVERSIONINFOA) };
+    GetRealOSVersion(&osvi);
+    if (osvi.dwMajorVersion < 10) return false;
+
+    g_hGdiPlus = LoadLibraryA("gdiplus.dll");
+    if (!g_hGdiPlus) return false;
+
+    GdiplusStartup = (FuncGdiplusStartup)GetProcAddress(g_hGdiPlus, "GdiplusStartup");
+    GdiplusShutdown = (FuncGdiplusShutdown)GetProcAddress(g_hGdiPlus, "GdiplusShutdown");
+    GdipCreateBitmapFromStream = (FuncGdipCreateBitmapFromStream)GetProcAddress(g_hGdiPlus, "GdipCreateBitmapFromStream");
+    GdipGetImageWidth = (FuncGdipGetImageWidth)GetProcAddress(g_hGdiPlus, "GdipGetImageWidth");
+    GdipGetImageHeight = (FuncGdipGetImageHeight)GetProcAddress(g_hGdiPlus, "GdipGetImageHeight");
+    GdipDisposeImage = (FuncGdipDisposeImage)GetProcAddress(g_hGdiPlus, "GdipDisposeImage");
+    GdipCreateFromHDC = (FuncGdipCreateFromHDC)GetProcAddress(g_hGdiPlus, "GdipCreateFromHDC");
+    GdipSetSmoothingMode = (FuncGdipSetSmoothingMode)GetProcAddress(g_hGdiPlus, "GdipSetSmoothingMode");
+    GdipSetInterpolationMode = (FuncGdipSetInterpolationMode)GetProcAddress(g_hGdiPlus, "GdipSetInterpolationMode");
+    GdipDrawImageRectI = (FuncGdipDrawImageRectI)GetProcAddress(g_hGdiPlus, "GdipDrawImageRectI");
+    GdipDeleteGraphics = (FuncGdipDeleteGraphics)GetProcAddress(g_hGdiPlus, "GdipDeleteGraphics");
+
+    if (!GdiplusStartup || !GdiplusShutdown || !GdipCreateBitmapFromStream || !GdipGetImageWidth ||
+        !GdipGetImageHeight || !GdipDisposeImage || !GdipCreateFromHDC || !GdipSetSmoothingMode ||
+        !GdipSetInterpolationMode || !GdipDrawImageRectI || !GdipDeleteGraphics) {
+        FreeLibrary(g_hGdiPlus);
+        g_hGdiPlus = NULL;
+        return false;
+    }
+
+    Status status = GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+    if (status != Ok) {
+        FreeLibrary(g_hGdiPlus);
+        g_hGdiPlus = NULL;
+        return false;
+    }
+
+    g_gdiplusInitialized = true;
+    return true;
+}
+
+void ShutdownGdiplus() {
+    if (g_logoLoaded && g_pLogoImage && GdipDisposeImage) {
+        GdipDisposeImage(g_pLogoImage);
+        g_pLogoImage = nullptr;
+        g_logoLoaded = false;
+    }
+    if (g_gdiplusInitialized && gdiplusToken && GdiplusShutdown) {
+        GdiplusShutdown(gdiplusToken);
+        gdiplusToken = 0;
+        g_gdiplusInitialized = false;
+    }
+    if (g_hGdiPlus) {
+        FreeLibrary(g_hGdiPlus);
+        g_hGdiPlus = NULL;
+        GdiplusStartup = NULL;
+        GdiplusShutdown = NULL;
+        GdipCreateBitmapFromStream = NULL;
+        GdipGetImageWidth = NULL;
+        GdipGetImageHeight = NULL;
+        GdipDisposeImage = NULL;
+        GdipCreateFromHDC = NULL;
+        GdipSetSmoothingMode = NULL;
+        GdipSetInterpolationMode = NULL;
+        GdipDrawImageRectI = NULL;
+        GdipDeleteGraphics = NULL;
+    }
+}
+
+bool LoadWindowsLogo() {
+    if (g_logoLoaded && g_pLogoImage) return true;
+    if (!InitializeGdiplus()) return false;
+
+    char szBasebrdPath[MAX_PATH] = "C:\\Windows\\Branding\\Basebrd\\basebrd.dll";
+    HMODULE hBasebrd = LoadLibraryA(szBasebrdPath);
+    if (!hBasebrd) {
+        char szSystemDir[MAX_PATH] = {0};
+        GetSystemDirectoryA(szSystemDir, MAX_PATH);
+        PathCombineA(szBasebrdPath, szSystemDir, "..\\Branding\\Basebrd\\basebrd.dll");
+        hBasebrd = LoadLibraryA(szBasebrdPath);
+        if (!hBasebrd) {
+            char szWindowsDir[MAX_PATH] = {0};
+            GetWindowsDirectoryA(szWindowsDir, MAX_PATH);
+            PathCombineA(szBasebrdPath, szWindowsDir, "Branding\\Basebrd\\basebrd.dll");
+            hBasebrd = LoadLibraryA(szBasebrdPath);
+            if (!hBasebrd) return false;
+        }
+    }
+
+    HRSRC hResInfo = FindResourceA(hBasebrd, MAKEINTRESOURCEA(2123), "IMAGE");
+    if (!hResInfo) hResInfo = FindResourceA(hBasebrd, MAKEINTRESOURCEA(2123), "PNG");
+    if (!hResInfo) hResInfo = FindResourceA(hBasebrd, MAKEINTRESOURCEA(2123), MAKEINTRESOURCEA(10));
+    if (!hResInfo) { FreeLibrary(hBasebrd); return false; }
+
+    HGLOBAL hResData = LoadResource(hBasebrd, hResInfo);
+    if (!hResData) { FreeLibrary(hBasebrd); return false; }
+
+    DWORD dwSize = SizeofResource(hBasebrd, hResInfo);
+    if (dwSize == 0) { FreeLibrary(hBasebrd); return false; }
+
+    void* pResourceData = LockResource(hResData);
+    if (!pResourceData) { FreeLibrary(hBasebrd); return false; }
+
+    HGLOBAL hBuffer = GlobalAlloc(GMEM_MOVEABLE, dwSize);
+    if (hBuffer) {
+        void* pBuffer = GlobalLock(hBuffer);
+        if (pBuffer) {
+            CopyMemory(pBuffer, pResourceData, dwSize);
+            GlobalUnlock(hBuffer);
+            IStream* pStream = nullptr;
+            if (SUCCEEDED(CreateStreamOnHGlobal(hBuffer, TRUE, &pStream))) {
+                Status status = GdipCreateBitmapFromStream(pStream, &g_pLogoImage);
+                pStream->Release();
+                if (g_pLogoImage && status == Ok) {
+                    GdipGetImageWidth(g_pLogoImage, (UINT*)&g_logoWidth);
+                    GdipGetImageHeight(g_pLogoImage, (UINT*)&g_logoHeight);
+                    g_logoLoaded = true;
+                    FreeLibrary(hBasebrd);
+                    return true;
+                }
+                if (g_pLogoImage) { GdipDisposeImage(g_pLogoImage); g_pLogoImage = nullptr; }
+            }
+        }
+        GlobalFree(hBuffer);
+    }
+    FreeLibrary(hBasebrd);
+    return false;
+}
+
+void DrawWindowsLogo(HDC hdc, int x, int y, int width, int height) {
+    if (!g_logoLoaded || !g_pLogoImage || !g_gdiplusInitialized) return;
+
+    void* graphics = nullptr;
+    if (GdipCreateFromHDC(hdc, &graphics) != Ok || !graphics) return;
+
+    GdipSetSmoothingMode(graphics, SmoothingModeHighQuality);
+    GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
+
+    float aspectRatio = (float)g_logoWidth / (float)g_logoHeight;
+    int drawWidth = width;
+    int drawHeight = (int)(width / aspectRatio);
+    if (drawHeight > height) {
+        drawHeight = height;
+        drawWidth = (int)(height * aspectRatio);
+    }
+    int drawX = x + (width - drawWidth) / 2;
+    int drawY = y + (height - drawHeight) / 2;
+
+    GdipDrawImageRectI(graphics, g_pLogoImage, drawX, drawY, drawWidth, drawHeight);
+    GdipDeleteGraphics(graphics);
+}
 
 bool IsServerEdition() {
     HKEY hKey;
     char installType[32] = {0};
     DWORD dwSize = sizeof(installType);
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                      "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExA(hKey, "InstallationType", nullptr, nullptr,
-                             reinterpret_cast<LPBYTE>(installType), &dwSize) == ERROR_SUCCESS)
-        {
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(hKey, "InstallationType", nullptr, nullptr, (LPBYTE)installType, &dwSize) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             return (strstr(installType, "Server") != nullptr);
         }
@@ -257,7 +390,7 @@ bool IsServerEdition() {
 }
 
 BOOL CALLBACK SetChildFont(HWND hWndChild, LPARAM lParam) {
-    SendMessage(hWndChild, WM_SETFONT, static_cast<WPARAM>(lParam), TRUE);
+    SendMessageA(hWndChild, WM_SETFONT, (WPARAM)lParam, TRUE);
     return TRUE;
 }
 
@@ -271,592 +404,463 @@ const char* GetWin9xProductName(DWORD dwMinorVersion, DWORD dwBuildNumber) {
 }
 
 const char* GetModernWindowsName(DWORD dwMajor, DWORD dwMinor, DWORD dwBuild) {
-    
-    bool isServerEdition = IsServerEdition();
-
+    bool isServer = IsServerEdition();
     if (dwMajor == 10) {
-        if (isServerEdition) {
+        if (isServer) {
             static char sServerName[128] = {0};
             char productName[128] = {0};
             DWORD dwSize = sizeof(productName);
             HKEY hKey;
-            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                              "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                              0, KEY_READ, &hKey) == ERROR_SUCCESS)
-            {
-                RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
-                                 reinterpret_cast<LPBYTE>(productName), &dwSize);
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                RegQueryValueExA(hKey, "ProductName", nullptr, nullptr, (LPBYTE)productName, &dwSize);
                 RegCloseKey(hKey);
             }
             strncpy(sServerName, productName, sizeof(sServerName) - 1);
-            sServerName[sizeof(sServerName) - 1] = '\0';
             return sServerName;
-        } else {
-            if (dwBuild >= 22000) return "11";
-            else return "10";
         }
-    }
-    if (dwMajor == 6) {
-        if (isServerEdition) {
-            static char sServerName[128] = {0};
-            char productName[128] = {0};
-            DWORD dwSize = sizeof(productName);
-            HKEY hKey;
-            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                              "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                              0, KEY_READ, &hKey) == ERROR_SUCCESS)
-            {
-                RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
-                                 reinterpret_cast<LPBYTE>(productName), &dwSize);
-                RegCloseKey(hKey);
-            }
-            strncpy(sServerName, productName, sizeof(sServerName) - 1);
-            sServerName[sizeof(sServerName) - 1] = '\0';
-            return sServerName;
-        } else {
-            switch (dwMinor) {
-                case 3: return "8.1";
-                case 2: return "8";
-                case 1: return "7";
-                case 0: return "Vista";
-            }
-        }
-    }
-    if (dwMajor == 5) {
-        switch (dwMinor) {
-            case 2: {
-                HKEY hKey;
-                char productName[64] = {0};
-                DWORD dwSize = sizeof(productName);
-                if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                                  "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                                  0, KEY_READ, &hKey) == ERROR_SUCCESS)
-                {
-                    RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
-                                     reinterpret_cast<LPBYTE>(productName), &dwSize);
-                    RegCloseKey(hKey);
-                    if (strstr(productName, "XP") || strstr(productName, "Client")) {
-                        return "XP x64";
-                    }
-                }
-                return "Server 2003";
-            }
-            case 1: return "XP";
-            case 0: return "2000";
-        }
-    }
-    if (dwMajor = 4) {
-        return isServerEdition ? "Windows NT 4.0 Server" : "Windows NT 4.0";
-    }
-    if (dwMajor = 3) {
-        return isServerEdition ? "Windows NT 3 Server" : "Windows NT 3";
+        return (dwBuild >= 22000) ? "11" : "10";
     }
     static char sProductName[128] = {0};
     char productName[128] = {0};
     DWORD dwSize = sizeof(productName);
     HKEY hKey;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                      "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
-                         reinterpret_cast<LPBYTE>(productName), &dwSize);
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        RegQueryValueExA(hKey, "ProductName", nullptr, nullptr, (LPBYTE)productName, &dwSize);
         RegCloseKey(hKey);
     }
     strncpy(sProductName, productName, sizeof(sProductName) - 1);
-    sProductName[sizeof(sProductName) - 1] = '\0';
     return sProductName;
 }
 
 char* GetWindowsVersion() {
     static char szVersion[256] = "";
-    OSVERSIONINFOA osvi = {0};
-    osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
-    GetRealOSVersion(&osvi);
-
-    if (osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 0 && osvi.szCSDVersion[0] == '\0') {
-        char regCSD[64] = "";
-        DWORD size = sizeof(regCSD);
-        HKEY hKey;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, 
-                          "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                          0, KEY_READ, &hKey) == ERROR_SUCCESS)
-        {
-            RegQueryValueExA(hKey, "CSDVersion", nullptr, nullptr,
-                             reinterpret_cast<LPBYTE>(regCSD), &size);
-            RegCloseKey(hKey);
-        }
-        if (regCSD[0] != '\0') {
-            strncpy(osvi.szCSDVersion, regCSD, sizeof(osvi.szCSDVersion) - 1);
-            osvi.szCSDVersion[sizeof(osvi.szCSDVersion) - 1] = '\0';
-        }
-    }
+    OSVERSIONINFOA osvi = { sizeof(OSVERSIONINFOA) };
+    GetRealOSVersion(&osvi); // 使用 GetVersionExA 获取真实版本
 
     char spBuffer[64] = "";
     if (osvi.szCSDVersion[0] != '\0') {
+        // 尝试提取数字 SP 版本
         const char* p = osvi.szCSDVersion;
-        while (*p && !isdigit(*p)) { ++p; }
-        if (*p && *p != '0') {
-            char number[16] = {0};
-            int i = 0;
-            while (isdigit(*p) && i < 15) {
-                number[i++] = *p;
-                p++;
-            }
-            number[i] = '\0';
-            sprintf(spBuffer, " sp%s", number);
+        while (*p && !isdigit(*p)) ++p; // 移动到第一个数字
+        if (*p && *p != '0') { // 确保找到非零数字
+            sprintf(spBuffer, " SP%s", p);
+        } else if (osvi.szCSDVersion[0] != '\0') {
+             // 如果没有数字，但有 CSDVersion，则直接附加（可能是一些非标准描述）
+             // 为避免显示 " Service Pack "，可以稍微清理一下
+             if (strncmp(osvi.szCSDVersion, "Service Pack ", 13) == 0 && isdigit(osvi.szCSDVersion[13])) {
+                 sprintf(spBuffer, " SP%c", osvi.szCSDVersion[13]); // 提取单个数字 SP
+             } else {
+                 // 对于非常规或非数字SP（虽然不常见），直接附加可能不是最佳选择
+                 // 安全起见，只处理已知模式
+                 // sprintf(spBuffer, " %s", osvi.szCSDVersion); // 如果需要显示完整 CSDVersion
+             }
         }
     }
 
     if (osvi.dwPlatformId == VER_PLATFORM_WIN32_WINDOWS) {
-        if (const char* product = GetWin9xProductName(osvi.dwMinorVersion, osvi.dwBuildNumber)) {
-            if (spBuffer[0] != '\0')
-                sprintf(szVersion, "Windows %s%s\r\n(Build %d.%02d.%04d)",
-                        product, spBuffer, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
-            else
-                sprintf(szVersion, "Windows %s\r\n(Build %d.%02d.%04d)",
-                        product, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
-        } else {
-            if (spBuffer[0] != '\0')
-                sprintf(szVersion, "Windows %d.%d%s\r\n(Build %d)",
-                        osvi.dwMajorVersion, osvi.dwMinorVersion, spBuffer, osvi.dwBuildNumber & 0xFFFF);
-            else
-                sprintf(szVersion, "Windows %d.%d\r\n(Build %d)",
-                        osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
+        // Windows 9x/Me 分支 (保持不变)
+        const char* product = GetWin9xProductName(osvi.dwMinorVersion, osvi.dwBuildNumber);
+        sprintf(szVersion, "Windows %s%s\r\n(Build %d.%02d.%04d)", product, spBuffer, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber & 0xFFFF);
+    } else if (osvi.dwPlatformId == VER_PLATFORM_WIN32_NT) {
+        // Windows NT 分支
+        const char* baseProductName = nullptr;
+        bool isServer = IsServerEdition(); // 检查是否为服务器版本
+
+        // --- 核心修改：添加对旧版本的显式检查 ---
+        if (osvi.dwMajorVersion == 4 && osvi.dwMinorVersion == 0) {
+            baseProductName = "NT 4.0"; // <--- 修复 NT 4.0 的关键
+        } else if (osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 0) {
+            baseProductName = "2000";
+        } else if (osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 1) {
+            baseProductName = "XP";
+        } else if (osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 2) {
+            // 5.2 可能是 XP Professional x64 Edition 或 Server 2003 / R2
+            // GetSystemMetrics(SM_SERVERR2) != 0 表示 R2
+            // 通过 IsServerEdition() 进一步区分
+             baseProductName = isServer ? "Server 2003" : "XP x64"; // 简化处理，优先考虑服务器，否则视为XP (x64)
+        } else if (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 0) {
+            baseProductName = isServer ? "Server 2008" : "Vista";
+        } else if (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 1) {
+            baseProductName = isServer ? "Server 2008 R2" : "7";
+        } else if (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 2) {
+            baseProductName = isServer ? "Server 2012" : "8";
+        } else if (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 3) {
+            baseProductName = isServer ? "Server 2012 R2" : "8.1";
         }
-    } else {
+        // --- 核心修改结束 ---
+
+        // 获取 UBR (主要用于 Win 10+)
         DWORD ubr = 0;
-        HKEY hKey;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                          "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-        {
-            DWORD dwSize = sizeof(DWORD);
-            RegQueryValueExA(hKey, "UBR", nullptr, nullptr, reinterpret_cast<LPBYTE>(&ubr), &dwSize);
-            RegCloseKey(hKey);
+        if (osvi.dwMajorVersion >= 10) {
+            HKEY hKey;
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                DWORD dwSize = sizeof(DWORD);
+                RegQueryValueExA(hKey, "UBR", nullptr, nullptr, (LPBYTE)&ubr, &dwSize);
+                RegCloseKey(hKey);
+            }
         }
 
-        if (const char* product = GetModernWindowsName(osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber)) {
-            if (osvi.dwMajorVersion >= 10 && !IsServerEdition()) {
+        char ubrBuffer[20] = "";
+        if (ubr > 0) {
+            sprintf(ubrBuffer, ".%d", ubr);
+        }
+
+
+        if (baseProductName != nullptr) {
+            // 如果我们通过版本号确定了名称 (适用于 NT 4.0 到 8.1)
+            sprintf(szVersion, "Windows %s%s\r\n(Build %d%s)",
+                    baseProductName,
+                    spBuffer, // Service Pack 信息
+                    osvi.dwBuildNumber,
+                    (osvi.dwMajorVersion >= 10) ? ubrBuffer : ""); // 仅为 Win 10+ 添加 UBR
+        } else {
+            // 回退到现代逻辑 (适用于 Win 10+ 或未明确处理的旧版本)
+            // 使用 GetModernWindowsName 获取注册表中的 ProductName (如 "10", "11" 或 详细服务器名)
+            const char* product = GetModernWindowsName(osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
+
+            if (osvi.dwMajorVersion >= 10 && !isServer) {
+                // 对于 Windows 10/11 客户端，尝试获取 DisplayVersion 或 ReleaseId
                 char displayVersion[64] = "";
-                HKEY hKey = nullptr;
-                if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                                  "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                HKEY hKey;
+                if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
                     DWORD dwSize = sizeof(displayVersion);
-                    if (RegQueryValueExA(hKey, "DisplayVersion", nullptr, nullptr,
-                                         reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
-                        dwSize = sizeof(displayVersion);
-                        if (RegQueryValueExA(hKey, "ReleaseId", nullptr, nullptr,
-                                             reinterpret_cast<LPBYTE>(displayVersion), &dwSize) != ERROR_SUCCESS) {
-                            displayVersion[0] = '\0';
-                        }
+                    // 优先 DisplayVersion (如 "22H2")
+                    if (RegQueryValueExA(hKey, "DisplayVersion", nullptr, nullptr, (LPBYTE)displayVersion, &dwSize) != ERROR_SUCCESS || displayVersion[0] == '\0') {
+                        // 回退到 ReleaseId (如 "2009")
+                         dwSize = sizeof(displayVersion); // 重置大小
+                        RegQueryValueExA(hKey, "ReleaseId", nullptr, nullptr, (LPBYTE)displayVersion, &dwSize);
                     }
                     RegCloseKey(hKey);
                 }
+
                 if (displayVersion[0] != '\0') {
-                    bool hasWindowsPrefix = (strncmp(product, "Windows", 7) == 0);
-                    if (ubr) {
-                        if (hasWindowsPrefix)
-                            sprintf(szVersion, "%s %s\r\n(Build %d.%d)", product, displayVersion, osvi.dwBuildNumber, ubr);
-                        else
-                            sprintf(szVersion, "Windows %s %s\r\n(Build %d.%d)", product, displayVersion, osvi.dwBuildNumber, ubr);
-                    } else {
-                        if (hasWindowsPrefix)
-                            sprintf(szVersion, "%s %s\r\n(Build %d)", product, displayVersion, osvi.dwBuildNumber);
-                        else
-                            sprintf(szVersion, "Windows %s %s\r\n(Build %d)", product, displayVersion, osvi.dwBuildNumber);
-                    }
-                    return szVersion;
-                }
-            }
-            bool hasWindowsPrefix = (strncmp(product, "Windows", 7) == 0);
-            if (spBuffer[0] != '\0') {
-                if (ubr) {
-                    if (hasWindowsPrefix)
-                        sprintf(szVersion, "%s%s\r\n(Build %d.%d)", product, spBuffer, osvi.dwBuildNumber, ubr);
-                    else
-                        sprintf(szVersion, "Windows %s%s\r\n(Build %d.%d)", product, spBuffer, osvi.dwBuildNumber, ubr);
+                    // 格式: Windows 10/11 <DisplayVersion> SP<x> Build <build>.<ubr>
+                    sprintf(szVersion, "Windows %s %s%s\r\n(Build %d%s)",
+                            product, // "10" or "11"
+                            displayVersion,
+                            spBuffer, // SP (理论上 Win10+ 没有传统 SP)
+                            osvi.dwBuildNumber,
+                            ubrBuffer);
                 } else {
-                    if (hasWindowsPrefix)
-                        sprintf(szVersion, "%s%s\r\n(Build %d)", product, spBuffer, osvi.dwBuildNumber);
-                    else
-                        sprintf(szVersion, "Windows %s%s\r\n(Build %d)", product, spBuffer, osvi.dwBuildNumber);
+                    // 如果 DisplayVersion/ReleaseId 都获取失败 (不太可能)
+                    sprintf(szVersion, "Windows %s%s\r\n(Build %d%s)",
+                            product,
+                            spBuffer,
+                            osvi.dwBuildNumber,
+                            ubrBuffer);
                 }
             } else {
-                if (ubr) {
-                    if (hasWindowsPrefix)
-                        sprintf(szVersion, "%s\r\n(Build %d.%d)", product, osvi.dwBuildNumber, ubr);
-                    else
-                        sprintf(szVersion, "Windows %s\r\n(Build %d.%d)", product, osvi.dwBuildNumber, ubr);
-                } else {
-                    if (hasWindowsPrefix)
-                        sprintf(szVersion, "%s\r\n(Build %d)", product, osvi.dwBuildNumber);
-                    else
-                        sprintf(szVersion, "Windows %s\r\n(Build %d)", product, osvi.dwBuildNumber);
-                }
-            }
-        } else {
-            if (spBuffer[0] != '\0') {
-                sprintf(szVersion, "Windows NT %d.%d%s\r\n(Build %d)",
-                        osvi.dwMajorVersion, osvi.dwMinorVersion, spBuffer, osvi.dwBuildNumber);
-            } else {
-                sprintf(szVersion, "Windows NT %d.%d\r\n(Build %d)",
-                        osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
+                // 对于服务器版本 (10+) 或其他未处理情况 (使用注册表 ProductName)
+                 // 格式: Windows <ProductName from Registry> SP<x> Build <build>.<ubr>
+                sprintf(szVersion, "Windows %s%s\r\n(Build %d%s)",
+                        product, // 来自 GetModernWindowsName (注册表 ProductName)
+                        spBuffer,
+                        osvi.dwBuildNumber,
+                        (osvi.dwMajorVersion >= 10) ? ubrBuffer : ""); // 仅为 Win 10+ 添加 UBR
             }
         }
+    } else {
+        // 未知平台
+        sprintf(szVersion, "Unknown Windows Platform %d\r\n(Version %d.%d Build %d%s)",
+                osvi.dwPlatformId, osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber, spBuffer);
     }
+
     return szVersion;
 }
 
 void GetRealOSVersion(OSVERSIONINFOA* osvi) {
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    if (hNtdll) {
-        using RtlGetVersionProc = LONG(WINAPI*)(LPOSVERSIONINFOEXW);
-        if (auto pRtlGetVersion = reinterpret_cast<RtlGetVersionProc>(
-            GetProcAddress(hNtdll, "RtlGetVersion")))
-        {
-            OSVERSIONINFOEXW osviW = { sizeof(osviW) };
-            if (pRtlGetVersion(&osviW) == 0) {
-                osvi->dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
-                osvi->dwMajorVersion = osviW.dwMajorVersion;
-                osvi->dwMinorVersion = osviW.dwMinorVersion;
-                osvi->dwBuildNumber = osviW.dwBuildNumber;
-                osvi->dwPlatformId = osviW.dwPlatformId;
-                WideCharToMultiByte(CP_ACP, 0, osviW.szCSDVersion, -1,
-                                    osvi->szCSDVersion, sizeof(osvi->szCSDVersion),
-                                    NULL, NULL);
-                return;
-            }
-        }
-    }
     osvi->dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
     GetVersionExA(osvi);
+}
+
+bool Is64BitOS() {
+    OSVERSIONINFOA osvi = { sizeof(OSVERSIONINFOA) };
+    GetRealOSVersion(&osvi);
+    if (osvi.dwPlatformId == VER_PLATFORM_WIN32_WINDOWS) return false;
+
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    return (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 || sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_IA64);
+}
+
+bool CanLoad64BitModules() {
+    OSVERSIONINFOA osvi = { sizeof(OSVERSIONINFOA) };
+    GetRealOSVersion(&osvi);
+    if (osvi.dwPlatformId == VER_PLATFORM_WIN32_WINDOWS) return true;
+
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (hKernel32) {
+        IsWow64ProcessProc fnIsWow64Process = (IsWow64ProcessProc)GetProcAddress(hKernel32, "IsWow64Process");
+        if (fnIsWow64Process) {
+            BOOL bIsWow64 = FALSE;
+            fnIsWow64Process(GetCurrentProcess(), &bIsWow64);
+            return !bIsWow64;
+        }
+    }
+    return true;
 }
 
 void InitDPIScaling(HWND hWnd, bool forceSystemDPI) {
     HMODULE hUser32 = LoadLibraryA("user32.dll");
     if (hUser32 && !forceSystemDPI) {
-        auto pGetDpiForWindow = reinterpret_cast<GetDpiForWindowProc>(
-            GetProcAddress(hUser32, "GetDpiForWindow"));
-        auto pGetDpiForSystem = reinterpret_cast<GetDpiForSystemProc>(
-            GetProcAddress(hUser32, "GetDpiForSystem"));
-
+        GetDpiForWindowProc pGetDpiForWindow = (GetDpiForWindowProc)GetProcAddress(hUser32, "GetDpiForWindow");
+        GetDpiForSystemProc pGetDpiForSystem = (GetDpiForSystemProc)GetProcAddress(hUser32, "GetDpiForSystem");
         if (pGetDpiForWindow) {
-            g_dpiX = pGetDpiForWindow(hWnd);
-            g_dpiY = g_dpiX;
-        }
-        else if (pGetDpiForSystem) {
-            g_dpiX = pGetDpiForSystem();
-            g_dpiY = g_dpiX;
+            g_dpiX = g_dpiY = pGetDpiForWindow(hWnd);
+        } else if (pGetDpiForSystem) {
+            g_dpiX = g_dpiY = pGetDpiForSystem();
         }
         FreeLibrary(hUser32);
     }
-
-    if (g_dpiX == BASE_DPI || forceSystemDPI) {
+    // Fallback or forced system DPI
+    if (g_dpiX == 0 || g_dpiY == 0 || g_dpiX == BASE_DPI || forceSystemDPI) {
         HDC hdc = GetDC(nullptr);
         g_dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
         g_dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
         ReleaseDC(nullptr, hdc);
+        // Ensure DPI is at least BASE_DPI
+        if (g_dpiX == 0) g_dpiX = BASE_DPI;
+        if (g_dpiY == 0) g_dpiY = BASE_DPI;
     }
 }
+
 
 void EnableModernFeatures() {
     HMODULE hUser32 = LoadLibraryA("user32.dll");
     if (hUser32) {
-        auto pSetContext = reinterpret_cast<SetProcessDPIAwarenessContextProc>(
-            GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
-        if (pSetContext && pSetContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+        SetProcessDPIAwarenessContextProc pSetContext = (SetProcessDPIAwarenessContextProc)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        if (pSetContext) {
+            // Try DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 first
+            if (!pSetContext((HANDLE)-4)) {
+                // Fallback to DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE
+                 pSetContext((HANDLE)-3);
+            }
             FreeLibrary(hUser32);
             return;
         }
-        FreeLibrary(hUser32);
-    }
-
-    HMODULE hShcore = LoadLibraryA("shcore.dll");
-    if (hShcore) {
-        auto pSetDPIAwareness = reinterpret_cast<SetProcessDPIAwarenessProc>(
-            GetProcAddress(hShcore, "SetProcessDpiAwareness"));
-        if (pSetDPIAwareness) {
-            pSetDPIAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
-            FreeLibrary(hShcore);
-            return;
-        }
-        FreeLibrary(hShcore);
-    }
-
-    HMODULE hUser32Again = LoadLibraryA("user32.dll");
-    if (hUser32Again) {
-        auto pSetDPIAware = reinterpret_cast<SetProcessDPIAwareProc>(
-            GetProcAddress(hUser32Again, "SetProcessDPIAware"));
+         // Fallback for older systems (Vista+)
+        SetProcessDPIAwareProc pSetDPIAware = (SetProcessDPIAwareProc)GetProcAddress(hUser32, "SetProcessDPIAware");
         if (pSetDPIAware) pSetDPIAware();
-        FreeLibrary(hUser32Again);
+        FreeLibrary(hUser32);
     }
 }
 
 bool IsModernUIAvailable() {
-    static int sModern = -1;
-    if (sModern == -1) {
-        OSVERSIONINFOA osvi = { 0 };
-        osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOA);
-        GetRealOSVersion(&osvi);
-        sModern = (osvi.dwMajorVersion >= 6) ? 1 : 0;
-    }
-    return sModern == 1;
+    OSVERSIONINFOA osvi = { sizeof(OSVERSIONINFOA) };
+    GetRealOSVersion(&osvi);
+    return (osvi.dwMajorVersion >= 6);
 }
 
 HFONT CreateDPIFont() {
-    int fontSize = -MulDiv(18, g_dpiY, 96);
+    // Slightly smaller font size for better fit, adjust 18 if needed
+    int fontSize = -MulDiv(17, g_dpiY, 96);
     const char* fontFace = IsModernUIAvailable() ? "Segoe UI" : "MS Sans Serif";
-    DWORD quality = IsModernUIAvailable() ? CLEARTYPE_QUALITY : DEFAULT_QUALITY;
-
-    return CreateFontA(
-        fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        quality, DEFAULT_PITCH | FF_DONTCARE, fontFace);
+    return CreateFontA(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, fontFace);
 }
 
 void UpdateLayout(HWND hWnd) {
     const char* versionStr = GetWindowsVersion();
-    bool isMultiline = (strstr(versionStr, "\r\n") != nullptr || strchr(versionStr, '\n') != nullptr);
+    bool isMultiline = (strstr(versionStr, "\r\n") != nullptr);
+    // *** MODIFIED: Increased Y offset for logo version ***
+    int textYOffset = g_logoLoaded ? SCALE_Y(105) : SCALE_Y(30); // Changed 90 to 105 for logo
 
-    if (HWND hVersionText = GetDlgItem(hWnd, 0)) {
-        int textHeight = isMultiline ? SCALE_Y(60) : SCALE_Y(30);
-        int textY = isMultiline ? SCALE_Y(30) : SCALE_Y(40);
-        
-        SetWindowPos(hVersionText, nullptr, SCALE_X(10), textY,
-                     SCALE_X(300), textHeight, SWP_NOZORDER);
-        SetWindowLongPtr(hVersionText, GWL_STYLE,
-                         WS_CHILD | WS_VISIBLE | SS_CENTER | SS_EDITCONTROL);
+    HWND hVersionText = GetDlgItem(hWnd, 0); // Assumes Static control has ID 0
+    if (hVersionText) {
+        // Adjust text height and Y based on multiline status and offset
+        int textHeight = isMultiline ? SCALE_Y(50) : SCALE_Y(30); // Reduced height slightly for multi
+        int textY = textYOffset + (isMultiline ? SCALE_Y(5) : SCALE_Y(15)); // Adjusted Y spacing
+        SetWindowPos(hVersionText, nullptr, SCALE_X(10), textY, SCALE_X(300), textHeight, SWP_NOZORDER);
         SetWindowTextA(hVersionText, versionStr);
     }
 
-    if (HWND hExitButton = GetDlgItem(hWnd, 1)) {
-        int buttonY = isMultiline ? 
-            (SCALE_Y(30) + SCALE_Y(60) + SCALE_Y(20)) : 
-            SCALE_Y(100);
-        int buttonWidth = isMultiline ? SCALE_X(60) : SCALE_X(50);
-
-        SetWindowPos(hExitButton, nullptr, 
-                    (SCALE_X(320) - buttonWidth) / 2,
-                    buttonY,
-                    buttonWidth, 
-                    SCALE_Y(35), 
-                    SWP_NOZORDER);
+    HWND hExitButton = GetDlgItem(hWnd, 1); // Assumes Button has ID 1
+    if (hExitButton) {
+         // Adjust button Y based on multiline status and offset
+        int buttonY = textYOffset + (isMultiline ? SCALE_Y(70) : SCALE_Y(60)); // Adjusted Y spacing
+        int buttonWidth = SCALE_X(60); // Standardized button width slightly
+        int buttonHeight = SCALE_Y(30); // Standardized button height slightly
+        SetWindowPos(hExitButton, nullptr, (SCALE_X(320) - buttonWidth) / 2, buttonY, buttonWidth, buttonHeight, SWP_NOZORDER);
     }
-    
-    SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 }
+
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
-    case WM_CREATE: {
-        // 创建控件及初始化等代码保持不变
-        if (IsModernUIAvailable()) {
-            BOOL fontSmoothing = TRUE;
-            SystemParametersInfo(SPI_SETFONTSMOOTHING, TRUE, &fontSmoothing, 0);
-            SystemParametersInfo(SPI_SETFONTSMOOTHINGTYPE, 0,
-                                   (PVOID)FE_FONTSMOOTHINGCLEARTYPE, 0);
-        }
-
+    case WM_CREATE:
         InitDPIScaling(hWnd);
         g_hFont = CreateDPIFont();
-
-        CreateWindowA("Static", GetWindowsVersion(),
-              WS_CHILD | WS_VISIBLE | SS_CENTER | SS_EDITCONTROL,
-              SCALE_X(10), SCALE_Y(30), SCALE_X(300), SCALE_Y(60),
-              hWnd, nullptr, nullptr, nullptr);
-
-        // 统一使用 UpdateLayout 中的位置计算逻辑创建按钮
-        bool isInitialMultiline = strstr(GetWindowsVersion(), "\r\n") != nullptr;
-        int initialButtonY = isInitialMultiline ? 
-            (SCALE_Y(30) + SCALE_Y(60) + SCALE_Y(20)) : 
-            SCALE_Y(100);
-        int initialButtonWidth = isInitialMultiline ? SCALE_X(60) : SCALE_X(50);
-
+        // *** MODIFIED: Increased Y offset for logo version and added HMENU IDs ***
+        // Create Static text (ID 0)
+        CreateWindowA("Static", "", WS_CHILD | WS_VISIBLE | SS_CENTER,
+                      SCALE_X(10), g_logoLoaded ? SCALE_Y(105) : SCALE_Y(30), // Y: 105 for logo, 30 for no logo
+                      SCALE_X(300), SCALE_Y(60), hWnd, (HMENU)0, nullptr, nullptr);
+        // Create OK Button (ID 1)
         CreateWindowA("Button", "OK", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                      (SCALE_X(320) - initialButtonWidth) / 2, initialButtonY,
-                      initialButtonWidth, SCALE_Y(35), hWnd, (HMENU)1, nullptr, nullptr);
+                      SCALE_X(135), g_logoLoaded ? SCALE_Y(185) : SCALE_Y(110), // Y: 185 for logo, 110 for no logo
+                      SCALE_X(50), SCALE_Y(35), hWnd, (HMENU)1, nullptr, nullptr);
 
-        if (g_hFont)
-            EnumChildWindows(hWnd, SetChildFont, reinterpret_cast<LPARAM>(g_hFont));
-            
-        // 调用深色模式设置（若用户注册表启用了深色模式则自动应用）
+        // *** ADDED: Call UpdateLayout immediately after creating controls ***
+        UpdateLayout(hWnd); // Set text and final positions
+
+        if (g_hFont) EnumChildWindows(hWnd, SetChildFont, (LPARAM)g_hFont);
         ApplyDarkModeSettings(hWnd);
         break;
-    }
-    case WM_DPICHANGED: {
-        auto prcNewWindow = reinterpret_cast<RECT*>(lParam);
-        SetWindowPos(hWnd, nullptr, prcNewWindow->left, prcNewWindow->top,
-                     prcNewWindow->right - prcNewWindow->left,
-                     prcNewWindow->bottom - prcNewWindow->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
-
-        // 修改处：正确设置水平与垂直 DPI 的顺序
-        g_dpiX = LOWORD(wParam); // 低位为水平 DPI
-        g_dpiY = HIWORD(wParam); // 高位为垂直 DPI
-        
-        if (g_hFont)
-            DeleteObject(g_hFont);
-        g_hFont = CreateDPIFont();
-        
-        SendMessage(hWnd, WM_SETREDRAW, FALSE, 0);
-        UpdateLayout(hWnd);
-        if (g_hFont)
-            EnumChildWindows(hWnd, SetChildFont, reinterpret_cast<LPARAM>(g_hFont));
-        SendMessage(hWnd, WM_SETREDRAW, TRUE, 0);
-        
-        RedrawWindow(hWnd, nullptr, nullptr,
-                     RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        FillRect(hdc, &rcClient, g_darkModeEnabled ? g_hDarkBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        // Draw logo slightly higher and give it consistent space
+        if (g_logoLoaded) DrawWindowsLogo(hdc, SCALE_X(10), SCALE_Y(10), rcClient.right - SCALE_X(20), SCALE_Y(85)); // Adjusted position/size
+        EndPaint(hWnd, &ps);
         return 0;
     }
-    case WM_CTLCOLORSTATIC: {
-        HDC hdcStatic = reinterpret_cast<HDC>(wParam);
-        if (g_darkModeEnabled) {
-            SetTextColor(hdcStatic, g_darkTextColor);
-            SetBkColor(hdcStatic, g_darkBkColor);
-            SetBkMode(hdcStatic, TRANSPARENT);  // 新增：设置透明背景模式
-            return (INT_PTR)g_hDarkBrush;
-        } else {
-            SetTextColor(hdcStatic, GetSysColor(COLOR_WINDOWTEXT));
-            SetBkColor(hdcStatic, GetSysColor(COLOR_BTNFACE));
-            SetBkMode(hdcStatic, OPAQUE);  // 新增：强制使用不透明背景
-            return (INT_PTR)(g_lightBrush ? g_lightBrush : GetSysColorBrush(COLOR_BTNFACE));
-        }
+    case WM_DPICHANGED: {
+        RECT* prcNewWindow = (RECT*)lParam;
+        SetWindowPos(hWnd, nullptr, prcNewWindow->left, prcNewWindow->top, prcNewWindow->right - prcNewWindow->left, prcNewWindow->bottom - prcNewWindow->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        // Re-initialize DPI based on the new window's DPI
+        // InitDPIScaling(hWnd); // Use the provided DPI instead
+        g_dpiX = LOWORD(wParam);
+        g_dpiY = HIWORD(wParam);
+
+        if (g_hFont) DeleteObject(g_hFont);
+        g_hFont = CreateDPIFont();
+        UpdateLayout(hWnd); // Update layout based on new DPI
+        if (g_hFont) EnumChildWindows(hWnd, SetChildFont, (LPARAM)g_hFont);
+        RedrawWindow(hWnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+        return 0;
     }
+    case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
-        HDC hdcEdit = reinterpret_cast<HDC>(wParam);
-        if (g_darkModeEnabled) {
-            SetTextColor(hdcEdit, g_darkTextColor);
-            SetBkColor(hdcEdit, g_darkBkColor);
-            SetBkMode(hdcEdit, TRANSPARENT);  // 新增：设置透明背景模式
-            return (INT_PTR)g_hDarkBrush;
-        } else {
-            SetTextColor(hdcEdit, GetSysColor(COLOR_WINDOWTEXT));
-            SetBkColor(hdcEdit, GetSysColor(COLOR_BTNFACE));
-            SetBkMode(hdcEdit, OPAQUE);  // 新增：强制使用不透明背景
-            return (INT_PTR)(g_lightBrush ? g_lightBrush : GetSysColorBrush(COLOR_BTNFACE));
-        }
+        HDC hdcStatic = (HDC)wParam;
+        SetTextColor(hdcStatic, g_darkModeEnabled ? g_darkTextColor : GetSysColor(COLOR_WINDOWTEXT));
+        SetBkColor(hdcStatic, g_darkModeEnabled ? g_darkBkColor : GetSysColor(COLOR_BTNFACE));
+        return (LRESULT)(g_darkModeEnabled ? g_hDarkBrush : (HBRUSH)(COLOR_BTNFACE + 1)); // Use standard brush for light mode
     }
     case WM_CTLCOLORBTN: {
-        HDC hdcButton = reinterpret_cast<HDC>(wParam);
-        if (g_darkModeEnabled)
-        {
-            SetTextColor(hdcButton, g_darkTextColor);
-            SetBkColor(hdcButton, g_darkBkColor);
-            return (INT_PTR)g_hDarkBrush;
-        }
-        else
-        {
-            SetTextColor(hdcButton, GetSysColor(COLOR_WINDOWTEXT));
-            SetBkColor(hdcButton, GetSysColor(COLOR_BTNFACE));
-            return (INT_PTR)g_lightBrush;
-        }
+        // Let buttons draw themselves for modern themes, especially in light mode
+         if (g_darkModeEnabled) {
+             HDC hdcBtn = (HDC)wParam;
+             SetTextColor(hdcBtn, g_darkTextColor);
+             SetBkColor(hdcBtn, g_darkBkColor);
+             return (LRESULT)g_hDarkBrush;
+         }
+         // For light mode, return NULL to allow default button drawing
+         return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        // return DefWindowProc(hWnd, message, wParam, lParam); // Alternative: forward to default processing
     }
     case WM_COMMAND:
-        if (LOWORD(wParam) == 1)
-            PostQuitMessage(0);
+        if (LOWORD(wParam) == 1) PostQuitMessage(0); // ID 1 is the OK button
         break;
     case WM_DESTROY:
-        if (g_hFont)
-            DeleteObject(g_hFont);
-        // 释放深色和浅色背景画刷，避免内存泄漏
-        if (g_hDarkBrush) {
-            DeleteObject(g_hDarkBrush);
-            g_hDarkBrush = nullptr;
-        }
-        if (g_lightBrush) {
-            DeleteObject(g_lightBrush);
-            g_lightBrush = nullptr;
-        }
+        if (g_hFont) DeleteObject(g_hFont);
+        if (g_hDarkBrush) DeleteObject(g_hDarkBrush);
+        if (g_lightBrush) DeleteObject(g_lightBrush); // Clean up light brush if created
+        ShutdownGdiplus();
         PostQuitMessage(0);
         break;
-    case WM_SETTINGCHANGE: {
-        // 检查是否是主题相关的设置更改
-        if (lParam && lstrcmpiA((LPCSTR)lParam, "ImmersiveColorSet") == 0) {
-            // 重新应用深色模式设置
+    case WM_SETTINGCHANGE:
+        // Check specifically for theme/color changes
+        if (lParam && (_stricmp((LPCSTR)lParam, "ImmersiveColorSet") == 0 || _stricmp((LPCSTR)lParam, "ThemeChanged") == 0)) {
+             // Re-apply dark mode settings which includes checking the registry again
+            bool wasDarkMode = g_darkModeEnabled;
             ApplyDarkModeSettings(hWnd);
-            
-            // 强制重绘整个窗口
-            RedrawWindow(hWnd, nullptr, nullptr,
-                RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+             // Force redraw only if mode actually changed or if it's dark mode (to apply theme correctly)
+            if (wasDarkMode != g_darkModeEnabled || g_darkModeEnabled) {
+                 InvalidateRect(hWnd, nullptr, TRUE);
+                 UpdateWindow(hWnd); // Ensure immediate redraw
+            }
         }
+        // Also handle system font changes if necessary
+        // if (wParam == SPI_SETNONCLIENTMETRICS || wParam == SPI_SETFONTSMOOTHING) {
+        //    if (g_hFont) DeleteObject(g_hFont);
+        //    g_hFont = CreateDPIFont();
+        //    EnumChildWindows(hWnd, SetChildFont, (LPARAM)g_hFont);
+        //    InvalidateRect(hWnd, nullptr, TRUE);
+        // }
         break;
-    }
     default:
         return DefWindowProcA(hWnd, message, wParam, lParam);
     }
     return 0;
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    EnableModernFeatures();
-    
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    EnableModernFeatures(); // Call this early
+
+    // Create a temporary window to get initial DPI before creating main window
     HWND hWndDummy = CreateWindowA("Static", nullptr, 0, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
-    InitDPIScaling(hWndDummy, true);
-    DestroyWindow(hWndDummy);
-
-    RECT rc = {0, 0, SCALE_X(320), SCALE_Y(180)};
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX), FALSE);
-
-    if (IsModernUIAvailable()) {
-        INITCOMMONCONTROLSEX icc = { sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES };
-        InitCommonControlsEx(&icc);
+    if (hWndDummy) {
+        InitDPIScaling(hWndDummy, false); // Use per-monitor DPI if available for initial scaling
+        DestroyWindow(hWndDummy);
+    } else {
+        InitDPIScaling(nullptr, true); // Fallback to system DPI if dummy window fails
     }
 
-    WNDCLASSA wc = {0};
-    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-    wc.lpfnWndProc   = WndProc;
-    wc.hInstance     = hInstance;
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    wc.lpszClassName = "WinVerClass";
+    LoadWindowsLogo(); // Attempt to load the logo
 
+    // *** MODIFIED: Increased height for logo version ***
+    RECT rc = {0, 0, SCALE_X(320), g_logoLoaded ? SCALE_Y(240) : SCALE_Y(160)}; // Height: 240 for logo, 160 for no logo
+    // Use WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX for a standard non-resizable window
+    DWORD dwStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    AdjustWindowRect(&rc, dwStyle, FALSE); // Adjust rect for the specified style
+
+    // Initialize Common Controls if needed (though not strictly required for Static/Button)
+    // if (IsModernUIAvailable()) {
+    //     INITCOMMONCONTROLSEX icc = { sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES };
+    //     InitCommonControlsEx(&icc);
+    // }
+
+    WNDCLASSA wc = { 0 }; // Initialize all members to zero/NULL
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION); // Load standard icon
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); // Default background
+    wc.lpszClassName = "WinVerClass";
     if (!RegisterClassA(&wc)) {
-        MessageBoxA(nullptr, "Window registration failed!", "Error", MB_ICONERROR);
+        MessageBoxA(nullptr, "Window Registration Failed!", "Error", MB_ICONEXCLAMATION | MB_OK);
         return 0;
     }
 
-    char szTitle[128] = "Windows Version";
+    char szTitle[128] = "About Windows"; // Default title
+    // Try to get actual product name for title
     HKEY hKey;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                     "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                     0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-       DWORD dwSize = sizeof(szTitle);
-       RegQueryValueExA(hKey, "ProductName", nullptr, nullptr,
-                        reinterpret_cast<LPBYTE>(szTitle), &dwSize);
-       RegCloseKey(hKey);
-    }
-    if (strstr(szTitle, "Enterprise LTSC") != nullptr) {
-        if (strstr(szTitle, "2024") != nullptr && strncmp(szTitle, "Windows 10", 10) == 0) {
-            szTitle[8] = '1';
-            szTitle[9] = '1';
-        }
-        char* pos = strstr(szTitle, "Enterprise LTSC");
-        if (pos != nullptr) {
-            memmove(pos, pos + 11, strlen(pos + 11) + 1);
-        }
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        DWORD dwSize = sizeof(szTitle);
+        RegQueryValueExA(hKey, "ProductName", nullptr, nullptr, (LPBYTE)szTitle, &dwSize);
+        RegCloseKey(hKey);
     }
 
-    HWND hWnd = CreateWindowA(
-        "WinVerClass", 
-        szTitle,
-        WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX),
-        CW_USEDEFAULT, CW_USEDEFAULT, 
-        rc.right - rc.left, rc.bottom - rc.top,
-        nullptr, nullptr, hInstance, nullptr);
+    // Calculate centered window position
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int windowWidth = rc.right - rc.left;
+    int windowHeight = rc.bottom - rc.top;
+    int posX = (screenWidth - windowWidth) / 2;
+    int posY = (screenHeight - windowHeight) / 2;
+
+
+    HWND hWnd = CreateWindowA(wc.lpszClassName, szTitle, dwStyle, // Use the defined style
+                              posX, posY, // Centered position
+                              windowWidth, windowHeight, // Adjusted width and height
+                              nullptr, nullptr, hInstance, nullptr);
 
     if (!hWnd) {
-        MessageBoxA(nullptr, "Window creation failed!", "Error", MB_ICONERROR);
+         MessageBoxA(nullptr, "Window Creation Failed!", "Error", MB_ICONEXCLAMATION | MB_OK);
         return 0;
     }
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
-    MSG msg{};
-    while (GetMessageA(&msg, nullptr, 0, 0)) {
+    MSG msg;
+    while (GetMessageA(&msg, nullptr, 0, 0) > 0) { // Use > 0 for safety
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
 
-    return static_cast<int>(msg.wParam);
+    return (int)msg.wParam;
 }
