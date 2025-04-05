@@ -1,9 +1,9 @@
-// 编译命令（32位）:
+// 编译命令（32位版，兼容Win95~Win11）:
 // windres --input-format=rc --output-format=coff --target=pe-i386 winver.rc -o winver.res
-// i686-w64-mingw32-g++ -o winver-x86.exe winver.cpp winver.res -mwindows -march=pentium -std=gnu++17 -D_WIN32_WINDOWS=0x0400 -Wl,--subsystem=windows -static-libgcc -static-libstdc++ -static -lcomctl32 -lkernel32 -luser32 -lgdi32 -lole32 -lshlwapi -ladvapi32
-// 编译命令（64位）:
+// i686-w64-mingw32-g++ -o winver-x86.exe winver.cpp winver.res -mwindows -march=pentium -std=gnu++17 -D_WIN32_WINDOWS=0x0400 -Wl,--subsystem=windows -static-libgcc -static-libstdc++ -static -lcomctl32 -lkernel32 -luser32 -lgdi32 -lole32 -lshlwapi -ladvapi32 -Wl,--gc-sections -O3
+// 编译命令（64位版，兼容WinXP x64~Win11）:
 // windres --input-format=rc --output-format=coff --target=pe-x86-64 winver.rc -o winver.res
-// x86_64-w64-mingw32-g++ -o winver-x64.exe winver.cpp winver.res -mwindows -march=x86-64 -mtune=generic -std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -Wl,--subsystem=windows -static-libgcc -static-libstdc++ -lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi
+// x86_64-w64-mingw32-g++ -o winver-x64.exe winver.cpp winver.res -mwindows -march=x86-64 -mtune=generic -std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -Wl,--subsystem=windows -static-libgcc -static-libstdc++ -lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi -Wl,--gc-sections -Ofast -funroll-loops -fpeel-loops -fpredictive-commoning -floop-interchange -floop-unroll-and-jam -finline-functions -fipa-cp -fipa-ra -fdevirtualize -foptimize-sibling-calls -ffast-math -fomit-frame-pointer -freorder-blocks -freorder-functions -fstrength-reduce -ftree-vectorize
 
 #include <windows.h>
 #include <commctrl.h>
@@ -1268,8 +1268,8 @@ void UpdateLayout(HWND hWnd) {
             }
             textYOffset += SCALE_Y(30); // XP界面中，分隔条下方空间增加到20像素
         } else if (g_logoLoaded) {
-            // 非XP但有Logo
-            textYOffset = SCALE_Y(90);
+            // 非XP但有Logo - 增加Y偏移以适应Logo下移的效果
+            textYOffset = SCALE_Y(100);
         } else {
             // 无Logo
             textYOffset = SCALE_Y(30);
@@ -1382,7 +1382,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     }
                 } else {
                     // 非XP系统使用原来的绘制位置和大小
-                    DrawWindowsLogo(hdc, SCALE_X(10), SCALE_Y(10), rcClient.right - SCALE_X(20), SCALE_Y(85));
+                    DrawWindowsLogo(hdc, SCALE_X(10), SCALE_Y(20), rcClient.right - SCALE_X(20), SCALE_Y(85));
                 }
             }
             
