@@ -45,10 +45,12 @@ jobs:
 
       - name: Setup GNU MinGW-w64 (GCC)
         if: matrix.toolchain == 'gcc'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -eo pipefail
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.apt }}
+          sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
 
       - name: Setup llvm-mingw toolchain
         if: matrix.toolchain == 'llvm'
