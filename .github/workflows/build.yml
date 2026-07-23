@@ -49,6 +49,17 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -eo pipefail
+          # GitHub runners periodically run apt-daily/unattended-upgrades at
+          # boot, which holds the dpkg lock and makes apt-get hang. Stop them
+          # and wait for the locks to clear before installing.
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          for _ in $(seq 1 60); do
+            if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
 
