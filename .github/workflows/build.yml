@@ -17,23 +17,18 @@ jobs:
       matrix:
         include:
           - arch: x86
-            toolchain: gcc
-            apt: gcc-mingw-w64-i686 g++-mingw-w64-i686
             triple: i686-w64-mingw32
             output: winver-x86.exe
             archflags: "-march=pentium -std=gnu++17 -O3 -D_WIN32_WINDOWS=0x0400"
             static: "-static-libgcc -static-libstdc++ -static"
             libs: "-lcomctl32 -lkernel32 -luser32 -lgdi32 -lole32 -lshlwapi -ladvapi32"
           - arch: x86-64
-            toolchain: gcc
-            apt: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
             triple: x86_64-w64-mingw32
             output: winver-x64.exe
-            archflags: "-march=x86-64 -mtune=generic -std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -Ofast -funroll-loops -fpeel-loops -fpredictive-commoning -floop-interchange -floop-unroll-and-jam -finline-functions -fipa-cp -fipa-ra -fdevirtualize -foptimize-sibling-calls -ffast-math -fomit-frame-pointer -freorder-blocks -freorder-functions -fstrength-reduce -ftree-vectorize"
+            archflags: "-march=x86-64 -mtune=generic -std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -O3 -ffast-math -funroll-loops -finline-functions -foptimize-sibling-calls -fomit-frame-pointer -floop-interchange -ftree-vectorize"
             static: "-static-libgcc -static-libstdc++"
             libs: "-lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi"
           - arch: arm64
-            toolchain: llvm
             triple: aarch64-w64-mingw32
             output: winver-arm64.exe
             archflags: "-std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -O3 -ffast-math -funroll-loops -finline-functions -foptimize-sibling-calls -fomit-frame-pointer -floop-interchange -ftree-vectorize"
@@ -43,28 +38,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup GNU MinGW-w64 (GCC)
-        if: matrix.toolchain == 'gcc'
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          set -eo pipefail
-          # GitHub runners periodically run apt-daily/unattended-upgrades at
-          # boot, which holds the dpkg lock and makes apt-get hang. Stop them
-          # and wait for the locks to clear before installing.
-          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-          sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          for _ in $(seq 1 60); do
-            if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
-
       - name: Setup llvm-mingw toolchain
-        if: matrix.toolchain == 'llvm'
         run: |
           set -eo pipefail
           VER=20260616
