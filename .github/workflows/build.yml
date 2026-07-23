@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            triple: i686-w64-mingw32
+            output: winver-x86.exe
+            archflags: "-march=pentium -std=gnu++17 -O3 -D_WIN32_WINDOWS=0x0400"
+            static: "-static-libgcc -static-libstdc++ -static"
+            libs: "-lcomctl32 -lkernel32 -luser32 -lgdi32 -lole32 -lshlwapi -ladvapi32"
+          - arch: x86-64
+            triple: x86_64-w64-mingw32
+            output: winver-x64.exe
+            archflags: "-march=x86-64 -mtune=generic -std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -Ofast -funroll-loops -fpeel-loops -fpredictive-commoning -floop-interchange -floop-unroll-and-jam -finline-functions -fipa-cp -fipa-ra -fdevirtualize -foptimize-sibling-calls -ffast-math -fomit-frame-pointer -freorder-blocks -freorder-functions -fstrength-reduce -ftree-vectorize"
+            static: "-static-libgcc -static-libstdc++"
+            libs: "-lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi"
+          - arch: arm64
+            triple: aarch64-w64-mingw32
+            output: winver-arm64.exe
+            archflags: "-std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -Ofast -funroll-loops -fpeel-loops -fpredictive-commoning -floop-interchange -floop-unroll-and-jam -finline-functions -fipa-cp -fipa-ra -fdevirtualize -foptimize-sibling-calls -ffast-math -fomit-frame-pointer -freorder-blocks -freorder-functions -fstrength-reduce -ftree-vectorize"
+            static: "-static-libgcc -static-libstdc++"
+            libs: "-lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup llvm-mingw toolchain
+        run: |
+          set -eo pipefail
+          VER=20260616
+          FILE=llvm-mingw-${VER}-ucrt-ubuntu-22.04-x86_64
+          curl -fL -o llvm-mingw.tar.xz "https://github.com/mstorsjo/llvm-mingw/releases/download/${VER}/${FILE}.tar.xz"
+          mkdir -p "$HOME/llvm-mingw"
+          tar -xf llvm-mingw.tar.xz -C "$HOME/llvm-mingw" --strip-components=1
+          echo "$HOME/llvm-mingw/bin" >> "$GITHUB_PATH"
+
+      - name: Build ${{ matrix.output }}
+        run: |
+          set -eo pipefail
+          ${{ matrix.triple }}-windres --input-format=rc --output-format=coff winver.rc -o winver.res
+          ${{ matrix.triple }}-g++ -o ${{ matrix.output }} winver.cpp winver.res -mwindows ${{ matrix.archflags }} -Wl,--subsystem=windows ${{ matrix.static }} ${{ matrix.libs }} -Wl,--gc-sections
+          ls -lh ${{ matrix.output }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
+          if-no-files-found: error
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.output }}" --clobber
