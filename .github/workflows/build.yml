@@ -1,6 +1,9 @@
 name: Build
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   release:
     types: [published]
   workflow_dispatch:
@@ -8,62 +11,224 @@ on:
 permissions:
   contents: write
 
+env:
+  LLVM_MINGW_VERSION: "20260616"
+
 jobs:
+  # ── 三架构交叉编译（CMake + llvm-mingw / clang）──
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86
-            triple: i686-w64-mingw32
-            output: winver-x86.exe
-            archflags: "-march=pentium -std=gnu++17 -O3 -D_WIN32_WINDOWS=0x0400"
-            static: "-static-libgcc -static-libstdc++ -static"
-            libs: "-lcomctl32 -lkernel32 -luser32 -lgdi32 -lole32 -lshlwapi -ladvapi32"
-          - arch: x86-64
-            triple: x86_64-w64-mingw32
-            output: winver-x64.exe
-            archflags: "-march=x86-64 -mtune=generic -std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -O3 -ffast-math -funroll-loops -finline-functions -foptimize-sibling-calls -fomit-frame-pointer -floop-interchange -ftree-vectorize"
-            static: "-static-libgcc -static-libstdc++"
-            libs: "-lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi"
-          - arch: arm64
-            triple: aarch64-w64-mingw32
-            output: winver-arm64.exe
-            archflags: "-std=gnu++17 -D_WIN32_WINDOWS=0x0410 -D_WIN32_WINNT=0x0502 -O3 -ffast-math -funroll-loops -finline-functions -foptimize-sibling-calls -fomit-frame-pointer -floop-interchange -ftree-vectorize"
-            static: "-static-libgcc -static-libstdc++"
-            libs: "-lcomctl32 -lkernel32 -luser32 -ladvapi32 -lshcore -lgdi32 -lole32 -ldwmapi -luxtheme -lshlwapi"
+        arch: [x86, x64, arm64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
       - name: Setup llvm-mingw toolchain
         run: |
           set -eo pipefail
-          VER=20260616
-          FILE=llvm-mingw-${VER}-ucrt-ubuntu-22.04-x86_64
-          curl -fL -o llvm-mingw.tar.xz "https://github.com/mstorsjo/llvm-mingw/releases/download/${VER}/${FILE}.tar.xz"
+          FILE=llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64
+          curl -fL -o llvm-mingw.tar.xz "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${FILE}.tar.xz"
           mkdir -p "$HOME/llvm-mingw"
           tar -xf llvm-mingw.tar.xz -C "$HOME/llvm-mingw" --strip-components=1
           echo "$HOME/llvm-mingw/bin" >> "$GITHUB_PATH"
 
-      - name: Build ${{ matrix.output }}
+      - name: Configure & build
         run: |
           set -eo pipefail
-          ${{ matrix.triple }}-windres --input-format=rc --output-format=coff winver.rc -o winver.res
-          ${{ matrix.triple }}-g++ -o ${{ matrix.output }} winver.cpp winver.res -mwindows ${{ matrix.archflags }} -Wl,--subsystem=windows ${{ matrix.static }} ${{ matrix.libs }} -Wl,--gc-sections
-          ls -lh ${{ matrix.output }}
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-llvm-mingw.cmake \
+            -DWINVER_ARCH=${{ matrix.arch }} \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          ls -lh build/winver-${{ matrix.arch }}.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.output }}
-          path: ${{ matrix.output }}
+          name: winver-${{ matrix.arch }}
+          path: build/winver-${{ matrix.arch }}.exe
           if-no-files-found: error
 
       - name: Upload to release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.output }}" --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" "build/winver-${{ matrix.arch }}.exe" --clobber
+
+  # ── 纯逻辑单元测试（主力，确定性）：控制台 exe 跑在 Wine headless ──
+  test-unit:
+    name: Unit tests (pure logic, Wine)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          set -eo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ninja-build wine64
+
+      - name: Setup llvm-mingw toolchain
+        run: |
+          set -eo pipefail
+          FILE=llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64
+          curl -fL -o llvm-mingw.tar.xz "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${FILE}.tar.xz"
+          mkdir -p "$HOME/llvm-mingw"
+          tar -xf llvm-mingw.tar.xz -C "$HOME/llvm-mingw" --strip-components=1
+          echo "$HOME/llvm-mingw/bin" >> "$GITHUB_PATH"
+
+      - name: Build tests (x64)
+        run: |
+          set -eo pipefail
+          cmake -B build-tests -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-llvm-mingw.cmake \
+            -DWINVER_ARCH=x64 -DWINVER_BUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-tests --target winver_tests
+
+      - name: Run tests under Wine
+        run: |
+          set -eo pipefail
+          export WINEDEBUG=-all
+          wine build-tests/winver-tests.exe
+
+  # ── Wine 多版本截图冒烟（集成级，best-effort）──
+  test-wine:
+    name: Wine screenshots
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Install deps
+        run: |
+          set -eo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y wine64 wine32:i386 xvfb imagemagick
+
+      - name: Download x86
+        uses: actions/download-artifact@v4
+        with:
+          name: winver-x86
+          path: exe
+
+      - name: Download x64
+        uses: actions/download-artifact@v4
+        with:
+          name: winver-x64
+          path: exe
+
+      - name: Spoof versions & screenshot
+        run: |
+          set -uo pipefail
+          export WINEDEBUG=-all
+          mkdir -p shots
+          declare -A VER=( [win95]=win95 [win98]=win98 [winme]=winme [win2k]=win2000 \
+                           [winxp]=winxp [win2k3]=win2003 [vista]=vista [win7]=win7 \
+                           [win8]=win8 [win81]=win81 [win10]=win10 [win11]=win11 )
+          run_one() {
+            local exe="$1" tag="$2" ver="$3"
+            wine reg add 'HKCU\Software\Wine' /v Version /d "$ver" /f >/dev/null 2>&1 || true
+            xvfb-run -a bash -c "
+              wine '$exe' &
+              WPID=\$!
+              sleep 4
+              if ! kill -0 \$WPID 2>/dev/null; then echo 'CRASH: $tag'; exit 1; fi
+              import -window root 'shots/${tag}.png' 2>/dev/null || true
+              kill \$WPID 2>/dev/null || true
+              wait \$WPID 2>/dev/null || true
+            "
+          }
+          FAIL=0
+          for key in "${!VER[@]}"; do
+            run_one "exe/winver-x64.exe" "x64-${key}" "${VER[$key]}" || FAIL=1
+            run_one "exe/winver-x86.exe" "x86-${key}" "${VER[$key]}" || FAIL=1
+          done
+          ls -lh shots || true
+          exit $FAIL
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots-wine
+          path: shots
+          if-no-files-found: warn
+
+  # ── 原生 Windows 截图（现代真机，x64）──
+  test-windows:
+    name: Native Windows (x64)
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - name: Download x64
+        uses: actions/download-artifact@v4
+        with:
+          name: winver-x64
+          path: exe
+
+      - name: Run & screenshot
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "exe/winver-x64.exe" -PassThru
+          Start-Sleep -Seconds 4
+          if ($p.HasExited) { Write-Error "Process exited early (code $($p.ExitCode))"; exit 1 }
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          $bmp.Save("$PWD/shots/win-x64.png")
+          Stop-Process -Id $p.Id -Force
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots-win-x64
+          path: shots
+          if-no-files-found: warn
+
+  # ── 原生 Windows ARM64 截图（可选补齐）──
+  test-windows-arm:
+    name: Native Windows (arm64)
+    runs-on: windows-11-arm
+    needs: build
+    continue-on-error: true
+    steps:
+      - name: Download arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: winver-arm64
+          path: exe
+
+      - name: Run & screenshot
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "exe/winver-arm64.exe" -PassThru
+          Start-Sleep -Seconds 4
+          if ($p.HasExited) { Write-Error "Process exited early (code $($p.ExitCode))"; exit 1 }
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          $bmp.Save("$PWD/shots/win-arm64.png")
+          Stop-Process -Id $p.Id -Force
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots-win-arm64
+          path: shots
+          if-no-files-found: warn
