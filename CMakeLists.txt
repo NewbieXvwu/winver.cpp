@@ -60,7 +60,9 @@ else()
     message(FATAL_ERROR "Unknown WINVER_ARCH: ${WINVER_ARCH} (expected x86|x64|arm64)")
 endif()
 
-target_compile_options(winver_core PUBLIC ${WINVER_ARCH_FLAGS} ${WINVER_OPT_FLAGS})
+# -ffunction-sections/-fdata-sections 让链接期 --gc-sections 能真正剔除未用代码/数据。
+target_compile_options(winver_core PUBLIC ${WINVER_ARCH_FLAGS} ${WINVER_OPT_FLAGS}
+    -ffunction-sections -fdata-sections)
 
 # RC 需要能找到 res/winver.manifest。
 set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --include-dir ${CMAKE_CURRENT_SOURCE_DIR}/res")
@@ -69,7 +71,7 @@ set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --include-dir ${CMAKE_CURRENT_SOURCE_DIR}/
 add_executable(winver WIN32 src/main.cpp res/winver.rc)
 target_link_libraries(winver PRIVATE winver_core ${WINVER_LIBS})
 target_link_options(winver PRIVATE
-    -mwindows -Wl,--subsystem=windows -Wl,--gc-sections ${WINVER_STATIC_LINK})
+    -mwindows -Wl,--subsystem=windows -Wl,--gc-sections -s ${WINVER_STATIC_LINK})
 set_target_properties(winver PROPERTIES OUTPUT_NAME ${WINVER_OUTPUT_NAME})
 
 # —— 纯逻辑单元测试（控制台 exe，可在 Wine headless 下运行）——
